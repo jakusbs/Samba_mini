@@ -15,4 +15,5 @@ X_NATURAL = "_natural_"   # the scan's natural x: position or coil command
 X_TIME = "_time_"         # elapsed time in seconds
 
 #: The data browser keeps its search index here (Samba used its config dir).
-CONFIG_DIR = str(paths.state_dir())
+#: Not created at import time; scan_index creates it when it first writes.
+CONFIG_DIR = str(paths.home() / "state")
