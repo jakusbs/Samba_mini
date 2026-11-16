@@ -1,0 +1,1537 @@
+"""
+data_browser.py (copied from Samba 75c0bdf core/data_browser.py; Samba_mini adds
+sub-group channels such as the averaged B-sweep loop) — Samba v3
+Browse, load and overlay past HDF5 scan files.
+
+Features:
+  • Tree view organised by date folder → scan files
+  • Metadata preview (scan type, points, sensors, status, duration)
+  • Load into 1D or 2D plot
+  • Overlay multiple 1D scans for comparison
+  • Handles incomplete/aborted files (from incremental saving)
+"""
+import os, glob, threading
+import numpy as np
+import h5py
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import matplotlib
+matplotlib.use('QtAgg')
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
+from matplotlib.figure import Figure
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QTreeWidget, QTreeWidgetItem, QLabel, QPushButton,
+    QComboBox, QGroupBox, QTextEdit, QCheckBox,
+    QFileDialog, QMessageBox, QHeaderView, QLineEdit
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor
+
+from core.plot_config import LEFT_COLORS, RIGHT_COLORS, COLORMAPS, CONFIG_DIR
+from core.plot_interact import (ClickReadout, make_fontsize_spin, eng_axis,
+                           fix_toolbar_icons, make_light_export_btn,
+                           make_kerr_pill, set_kerr_pill)
+from core.theme import DIVERGING_CMAPS
+from core import kerr
+from core import scan_index
+
+# Sentinel x-axis key: plot the signal against its sample index (1, 2, 3, …)
+# instead of any stored actuator/field/time axis. Not a real dataset name.
+# Raw-metadata keys not worth repeating in the "Other metadata" block:
+# sensors_json is a long JSON blob already summarised as "Sensors:", and the
+# rest are duplicated verbatim by the curated sections above.
+_SKIP_RAW_META = {"sensors_json", "scan_name", "n_x", "n_y",
+                  "points_acquired", "points_planned", "duration_seconds",
+                  "integration_time", "settle_time"}
+
+INDEX_KEY = "__index__"
+
+# Axis datasets in the legacy flat `/measurement` layout, excluded so they are
+# not offered as measured channels.  This was referenced in _read_meta but
+# never defined: every legacy file raised NameError there, was caught by the
+# outer handler and marked invalid, so old scans could not be opened at all.
+_AXIS_NAMES = frozenset({"x", "y", "x_actual", "y_actual", "actuator_x",
+                         "actuator_y", "field", "field_T", "field_mT",
+                         "time", "elapsed_time", "timestamp"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scan file reader — reads both old (end-of-scan) and new (incremental) HDF5
+# ─────────────────────────────────────────────────────────────────────────────
+class ScanFile:
+    """Lightweight wrapper around one HDF5 scan file."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.basename = os.path.basename(path)
+        self.valid = False
+        self.meta: Dict = {}
+        # Every /metadata attribute not already in the curated `meta` dict, so
+        # nothing written to the file is invisible in the browser.
+        self.raw_meta: Dict = {}
+        self.sensor_keys: List[str] = []
+        self.sensor_labels: Dict[str, str] = {}  # key → label
+        # The λ/2 sweep this scan was recorded with (/data/calibration), so a
+        # past file is converted with its own calibration rather than whatever
+        # is currently in the BD Calibration tab.
+        self.bd_calibration: Optional[List[float]] = None
+        self.kerr = kerr.KerrCalibration()
+        self._read_meta()
+
+    def _read_meta(self):
+        try:
+            with h5py.File(self.path, "r") as f:
+                is_new = "data" in f          # new layout flag
+                is_dc  = (f.attrs.get("scan_type", "?") == "DC_HYST")
+
+                # ── Shared root attrs (same in both layouts) ──────────────────
+                scan_type = str(f.attrs.get("scan_type", "?"))
+                status    = str(f.attrs.get("scan_status", "completed"))
+                timestamp = str(f.attrs.get("timestamp", ""))
+
+                # ── Size / count params ───────────────────────────────────────
+                if is_new:
+                    meta_g = f.get("metadata", f)   # fallback to root if absent
+                    n_loop       = int(meta_g.attrs.get("n_loop", 0))
+                    n_x_raw      = n_loop if is_dc else int(meta_g.attrs.get("n_x", 0))
+                    n_y_raw      = 1      if is_dc else int(meta_g.attrs.get("n_y", 0))
+                    pts_acq      = int(meta_g.attrs.get("points_acquired", 0))
+                    pts_plan     = int(meta_g.attrs.get("points_planned", n_loop if is_dc else 0))
+                    int_time     = float(meta_g.attrs.get("integration_time",
+                                         meta_g.attrs.get("IntegrationTime", 0)))
+                    settle       = float(meta_g.attrs.get("settle_time", 0))
+                    duration     = float(f.attrs.get("duration_seconds",
+                                         meta_g.attrs.get("duration_seconds", 0)))
+                    operator     = str(meta_g.attrs.get("operator", ""))
+                    sample_id    = str(meta_g.attrs.get("sample_id", ""))
+                    notes        = str(meta_g.attrs.get("notes", ""))
+                    scan_name    = str(meta_g.attrs.get("scan_name", "?"))
+                else:
+                    # ── Old layout: everything in root attrs ──────────────────
+                    n_loop   = int(f.attrs.get("n_loop", 0))
+                    n_x_raw  = n_loop if is_dc else int(f.attrs.get("n_x", 0))
+                    n_y_raw  = 1      if is_dc else int(f.attrs.get("n_y", 0))
+                    pts_acq  = int(f.attrs.get("points_acquired", 0))
+                    pts_plan = int(f.attrs.get("points_planned", n_loop))
+                    int_time = float(f.attrs.get("IntegrationTime" if is_dc
+                                                  else "integration_time", 0))
+                    settle   = float(f.attrs.get("settle_time", 0))
+                    duration = float(f.attrs.get("duration_seconds", 0))
+                    operator  = str(f.attrs.get("operator", ""))
+                    sample_id = str(f.attrs.get("sample_id", ""))
+                    notes     = str(f.attrs.get("notes", ""))
+                    scan_name = str(f.attrs.get("scan_name", "?"))
+
+                self.meta = {
+                    "scan_type":        scan_type,
+                    "scan_name":        scan_name,
+                    "timestamp":        timestamp,
+                    "scan_status":      status,
+                    "points_acquired":  pts_acq,
+                    "points_planned":   pts_plan,
+                    "n_x":              n_x_raw,
+                    "n_y":              n_y_raw,
+                    "integration_time": int_time,
+                    "settle_time":      settle,
+                    "duration_seconds": duration,
+                    "operator":         operator,
+                    "sample_id":        sample_id,
+                    "notes":            notes,
+                    "is_dc_hyst":       is_dc,
+                }
+
+                # ── λ/2 (BD) calibration recorded with this scan ──────────────
+                # All-zero means "no calibration" — the writers skip that case
+                # (§37), but an older file may still carry one.
+                if is_new and "calibration" in f.get("data", {}):
+                    try:
+                        cal = np.asarray(f["data"]["calibration"][:],
+                                         dtype=float).ravel()
+                        if cal.size and np.any(cal != 0.0):
+                            self.bd_calibration = [float(v) for v in cal]
+                            self.kerr = kerr.KerrCalibration(self.bd_calibration)
+                    except Exception:
+                        pass
+
+                # ── Hardware snapshot & step-size attrs ───────────────────────
+                _meta_src = f.get("metadata", f)
+                for k in (
+                    "hw_keithley_amplitude_mA", "hw_keithley_frequency_Hz",
+                    "hw_keithley_range",        "hw_keithley_compliance_V",
+                    "hw_keithley_current_mA",
+                    "hw_zi_tc_s",               "hw_zi_order",
+                    "hw_zi_settling_s",         "hw_relay_state",
+                    "hw_field_mT",              "hw_magnet_current_A",
+                    "hw_act1_pos",              "hw_act2_pos",
+                    "hw_temperature_K",         "hw_vti_temp_K",
+                    "hw_magnet_temp_K",
+                    "act1_step", "act2_step",   "field_step_A",
+                    "is_temp_sweep",
+                    "temp_sweep_start_K", "temp_sweep_stop_K", "temp_sweep_step_K",
+                    "geometry", "stage_type", "field_segments_json",
+                ):
+                    v = _meta_src.attrs.get(k)
+                    if v is not None:
+                        self.meta[k] = v
+
+                # Everything else that was written to /metadata.  The list
+                # above is a hand-curated display order; without this catch-all
+                # any attribute not on it — polarization, device_id, the
+                # thicknesses, the software provenance, the polarity flags —
+                # was invisible in the browser even though it is in the file.
+                try:
+                    for _k in _meta_src.attrs:
+                        if _k not in self.meta:
+                            self.raw_meta[str(_k)] = _meta_src.attrs[_k]
+                except Exception:
+                    pass
+
+                # Normalise scan_type for display
+                if self.meta.get("is_temp_sweep"):
+                    self.meta["scan_type"] = "TEMP_SWEEP"
+
+                # ── DC extra scalars ──────────────────────────────────────────
+                if is_dc:
+                    src = f.get("metadata", f)
+                    for s in ("Hc", "Hshift", "Mr", "Ms"):
+                        self.meta[s] = float(src.attrs.get(s, float("nan")))
+                    # Peak coil current [A].  Files written before the unit fix
+                    # stored the same number under "MagneticField_V".
+                    self.meta["MagneticField_A"] = float(
+                        src.attrs.get("MagneticField_A",
+                                      src.attrs.get("MagneticField_V",
+                                                    float("nan"))))
+                    self.meta["Cycles"] = int(src.attrs.get("Cycles", 0))
+                    self.meta["NumberOfPoints"] = int(
+                        src.attrs.get("NumberOfPoints", 0))
+
+                # ── Discover sensor keys ──────────────────────────────────────
+                if is_new:
+                    dg = f.get("data", {})
+                    for key in dg:
+                        if isinstance(dg[key], h5py.Group):
+                            # Samba_mini: sub-groups such as the averaged
+                            # B-sweep loop or XY map repeats.
+                            for sub in dg[key]:
+                                obj = dg[key][sub]
+                                if (isinstance(obj, h5py.Dataset)
+                                        and str(obj.attrs.get("role", "")) == "sensor"):
+                                    k2 = f"{key}/{sub}"
+                                    self.sensor_keys.append(k2)
+                                    self.sensor_labels[k2] = (
+                                        f"{obj.attrs.get('label', sub)} [{key}]")
+                            continue
+                        role = str(dg[key].attrs.get("role", ""))
+                        if role == "sensor":
+                            self.sensor_keys.append(key)
+                            self.sensor_labels[key] = str(
+                                dg[key].attrs.get("label", key))
+                elif "sensors" in f:
+                    for key in f["sensors"]:
+                        self.sensor_keys.append(key)
+                        self.sensor_labels[key] = str(
+                            f["sensors"][key].attrs.get("label", key))
+                elif "measurement" in f:
+                    for key in f["measurement"]:
+                        if key not in _AXIS_NAMES:
+                            self.sensor_keys.append(key)
+                            self.sensor_labels[key] = str(
+                                f["measurement"][key].attrs.get("label", key))
+
+                self.valid = True
+        except Exception:
+            self.valid = False
+
+    def read_1d(self, x_key: str = "auto", y_key: str = "auto") -> Optional[Dict]:
+        """
+        Read 1D data from the file.
+        Supports both new layout (/data/) and old layout (/measurement/, /axes/, /sensors/).
+        Returns dict with 'x', 'y', 'x_label', 'y_label', 'x_unit', 'y_unit'.
+        """
+        try:
+            with h5py.File(self.path, "r") as f:
+                is_new = "data" in f
+                is_dc  = (f.attrs.get("scan_type", "") == "DC_HYST")
+
+                if is_new:
+                    dg = f["data"]
+
+                    # Find the x-axis dataset by role attr — name-agnostic
+                    x_ds_key = next(
+                        (k for k in dg if str(dg[k].attrs.get("role","")) == "x"),
+                        None)
+
+                    if is_dc:
+                        if x_ds_key is None:
+                            return None
+                        x_arr  = dg[x_ds_key][:]
+                        x_lbl  = str(dg[x_ds_key].attrs.get("label", "Field"))
+                        x_unit = str(dg[x_ds_key].attrs.get("unit",  "mT"))
+                        if y_key == "auto":
+                            y_key = self.sensor_keys[0] if self.sensor_keys else None
+                        if y_key is None or y_key not in dg:
+                            return None
+                    else:
+                        if y_key != "auto" and isinstance(y_key, str) and "/" in y_key:
+                            # Sub-group channel: take x from the same group.
+                            grp = dg[y_key.rsplit("/", 1)[0]]
+                            x_ds_key = next(
+                                (f"{grp.name.split('/data/', 1)[-1]}/{k}" for k in grp
+                                 if str(grp[k].attrs.get("role", "")) == "x"), None)
+                        if x_ds_key is None:
+                            return None
+                        if x_key != "auto" and x_key in dg and "/" not in str(y_key):
+                            x_ds_key = x_key   # honour explicit caller choice
+                        x_arr  = dg[x_ds_key][:].flatten()
+                        x_lbl  = str(dg[x_ds_key].attrs.get("label", x_ds_key))
+                        x_unit = str(dg[x_ds_key].attrs.get("unit",  ""))
+                        if y_key == "auto":
+                            y_key = self.sensor_keys[0] if self.sensor_keys else None
+                        if y_key is None or y_key not in dg:
+                            return None
+
+                    y_arr  = dg[y_key][:].flatten()
+                    y_lbl  = str(dg[y_key].attrs.get("label", y_key))
+                    y_unit = str(dg[y_key].attrs.get("unit",  ""))
+                    x_arr  = x_arr.flatten()
+
+                else:
+                    # ── Old layout ────────────────────────────────────────────
+                    if is_dc:
+                        if "axes" not in f or "sensors" not in f:
+                            return None
+                        x_arr  = f["axes"]["field_mT"][:]
+                        x_lbl  = str(f["axes"]["field_mT"].attrs.get("label", "Field"))
+                        x_unit = str(f["axes"]["field_mT"].attrs.get("unit",  "mT"))
+                        if y_key == "auto":
+                            y_key = self.sensor_keys[0] if self.sensor_keys else None
+                        if y_key is None or y_key not in f["sensors"]:
+                            return None
+                        y_arr  = f["sensors"][y_key][:].flatten()
+                        y_lbl  = str(f["sensors"][y_key].attrs.get("label", y_key))
+                        y_unit = str(f["sensors"][y_key].attrs.get("unit",  "V"))
+                        x_arr  = x_arr.flatten()
+                    else:
+                        if "measurement" not in f:
+                            return None
+                        meas = f["measurement"]
+                        if x_key == "auto":
+                            x_key = meas.attrs.get("axes", "x_actual")
+                            if x_key not in meas:
+                                for c in ["x_actual", "field_T", "time"]:
+                                    if c in meas:
+                                        x_key = c; break
+                        if y_key == "auto":
+                            y_key = meas.attrs.get("signal", "")
+                            if y_key not in meas and self.sensor_keys:
+                                y_key = self.sensor_keys[0]
+                        if x_key not in meas or y_key not in meas:
+                            return None
+                        x_arr  = meas[x_key][:]
+                        y_arr  = meas[y_key][:]
+                        x_lbl  = str(meas[x_key].attrs.get("label", x_key))
+                        y_lbl  = str(meas[y_key].attrs.get("label", y_key))
+                        x_unit = str(meas[x_key].attrs.get("unit",  ""))
+                        y_unit = str(meas[y_key].attrs.get("unit",  ""))
+
+                y = y_arr.flatten()
+                if x_key == INDEX_KEY:
+                    # Point-by-point: ignore the stored x, plot vs. sample index
+                    # (1, 2, 3, …).  Keep every finite y sample.
+                    mask = np.isfinite(y)
+                    x = np.arange(y.size, dtype=float)[mask]
+                    return {
+                        "x": x, "y": y[mask],
+                        "x_label": "Point", "y_label": y_lbl,
+                        "x_unit":  "", "y_unit":  y_unit,
+                    }
+                x = x_arr.flatten()
+                mask = np.isfinite(x) & np.isfinite(y)
+                return {
+                    "x": x[mask], "y": y[mask],
+                    "x_label": x_lbl, "y_label": y_lbl,
+                    "x_unit":  x_unit, "y_unit":  y_unit,
+                }
+        except Exception:
+            return None
+    def read_2d(self, sensor_key: str = "auto") -> Optional[Dict]:
+        """
+        Read 2D data.  Supports new (/data/) and old (/sensors/ + /axes/) layouts.
+        Returns dict with 'data', 'x_arr', 'y_arr', 'x_label', 'y_label', 'sensor_label'.
+        """
+        try:
+            with h5py.File(self.path, "r") as f:
+                is_new = "data" in f
+                if sensor_key == "auto":
+                    sensor_key = self.sensor_keys[0] if self.sensor_keys else None
+                if sensor_key is None:
+                    return None
+
+                if is_new:
+                    dg = f["data"]
+                    if sensor_key not in dg:
+                        return None
+                    data_arr = dg[sensor_key][:]
+                    slbl = str(dg[sensor_key].attrs.get("label", sensor_key))
+                    sunit = str(dg[sensor_key].attrs.get("unit", ""))
+                    # Find x/y setpoints by role — name-agnostic
+                    xset_key = next(
+                        (k for k in dg if str(dg[k].attrs.get("role","")) == "x_setpoint"),
+                        None)
+                    yset_key = next(
+                        (k for k in dg if str(dg[k].attrs.get("role","")) == "y_setpoint"),
+                        None)
+                    if xset_key:
+                        x_arr = dg[xset_key][:]
+                        x_lbl = str(dg[xset_key].attrs.get("label", "X"))
+                        x_lbl = x_lbl.replace(" (setpoint)", "")
+                    else:
+                        x_arr = np.arange(data_arr.shape[-1]); x_lbl = "Index"
+                    if yset_key:
+                        y_arr = dg[yset_key][:]
+                        y_lbl = str(dg[yset_key].attrs.get("label", "Y"))
+                        y_lbl = y_lbl.replace(" (setpoint)", "")
+                    else:
+                        y_arr = np.arange(data_arr.shape[0]); y_lbl = "Row"
+                else:
+                    if "sensors" not in f or "axes" not in f:
+                        return None
+                    if sensor_key not in f["sensors"]:
+                        return None
+                    data_arr = f["sensors"][sensor_key][:]
+                    slbl = str(f["sensors"][sensor_key].attrs.get("label", sensor_key))
+                    sunit = str(f["sensors"][sensor_key].attrs.get("unit", ""))
+                    x_col = "field_T" if "field_T" in f["axes"] else "x_actual"
+                    if x_col in f["axes"]:
+                        x_arr = f["axes"]["x_setpoint"][:]
+                        x_lbl = str(f["axes"]["x_setpoint"].attrs.get("label", "X"))
+                    else:
+                        x_arr = np.arange(data_arr.shape[1]); x_lbl = "Index"
+                    if "y" in f["axes"]:
+                        y_arr = f["axes"]["y"][:]
+                        y_lbl = str(f["axes"]["y"].attrs.get("label", "Y"))
+                    else:
+                        y_arr = np.arange(data_arr.shape[0]); y_lbl = "Row"
+
+                return {
+                    "data": data_arr, "x_arr": x_arr, "y_arr": y_arr,
+                    "x_label": x_lbl, "y_label": y_lbl,
+                    "sensor_label": slbl, "sensor_unit": sunit,
+                }
+        except Exception:
+            return None
+
+    def list_columns(self) -> List[Tuple[str, str]]:
+        """Return [(key, display_label)] for all plottable columns."""
+        cols = []
+        try:
+            with h5py.File(self.path, "r") as f:
+                is_new = "data" in f
+                is_dc  = (f.attrs.get("scan_type", "") == "DC_HYST")
+
+                if is_new:
+                    dg = f["data"]
+                    for key in dg:
+                        if isinstance(dg[key], h5py.Group):
+                            for sub in dg[key]:
+                                obj = dg[key][sub]
+                                if (isinstance(obj, h5py.Dataset)
+                                        and str(obj.attrs.get("role", "")) == "sensor"):
+                                    u = str(obj.attrs.get("unit", ""))
+                                    lbl = f"{obj.attrs.get('label', sub)} [{key}]"
+                                    cols.append((f"{key}/{sub}", f"{lbl} ({u})" if u else lbl))
+                            continue
+                        role  = str(dg[key].attrs.get("role", ""))
+                        label = str(dg[key].attrs.get("label", key))
+                        unit  = str(dg[key].attrs.get("unit",  ""))
+                        # Expose the actual axis (role "x") and sensors as
+                        # plottable; hide setpoints and the y/y_setpoint aux arrays
+                        if role in ("x_setpoint", "y", "y_setpoint"):
+                            continue
+                        display = f"{label} ({unit})" if unit else label
+                        cols.append((key, display))
+                elif is_dc:
+                    if "axes" in f and "field_mT" in f["axes"]:
+                        lbl  = f["axes"]["field_mT"].attrs.get("label", "Field")
+                        unit = f["axes"]["field_mT"].attrs.get("unit",  "mT")
+                        cols.append(("field_mT", f"{lbl} ({unit})"))
+                    if "sensors" in f:
+                        for key in f["sensors"]:
+                            lbl = f["sensors"][key].attrs.get("label", key)
+                            cols.append((key, str(lbl)))
+                elif "measurement" in f:
+                    for key in f["measurement"]:
+                        lbl = f["measurement"][key].attrs.get("label", key)
+                        cols.append((key, str(lbl)))
+        except Exception:
+            pass
+        return cols
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Preview plot widget
+# ─────────────────────────────────────────────────────────────────────────────
+class BrowserPlotWidget(QWidget):
+    """Standalone plot for the data browser — supports 1D overlay and 2D display."""
+
+    # Emitted when the θ pill is clicked (or the shared state changes) so the
+    # panel re-reads the files and re-plots with the new unit.
+    kerr_changed = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # constrained_layout keeps the axes filling the figure (with the
+        # colorbar) across resizes — avoids the map shrinking to a narrow strip.
+        self.fig    = Figure(figsize=(6, 4), dpi=100, facecolor="#1e1e2e",
+                             constrained_layout=True)
+        self.ax     = self.fig.add_subplot(111)
+        self.canvas = FigureCanvas(self.fig)
+        self.bar    = NavToolbar(self.canvas, None)
+        self.bar.setStyleSheet("background:#1e1e2e;color:white;")
+        fix_toolbar_icons(self.bar)
+        self._font_pt = 9
+
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(6)
+        top.addWidget(self.bar, stretch=1)
+        top.addWidget(make_light_export_btn(lambda: self.fig, self))
+        self._kerr_state = None
+        self._kerr_available = False
+        self.kerr_btn = make_kerr_pill(self._on_kerr_clicked, self)
+        top.addWidget(self.kerr_btn)
+        self._refresh_kerr_btn()
+        _tx = QLabel("Text:"); _tx.setStyleSheet("color:#a6adc8;font-size:10px;")
+        top.addWidget(_tx)
+        self.fs_spin = make_fontsize_spin(self._font_pt, self._on_fontsize)
+        top.addWidget(self.fs_spin)
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        lay.addLayout(top)
+        lay.addWidget(self.canvas, stretch=1)
+        self._cb     = None
+        self._is_2d  = False
+        self._style()
+        # Left-click a curve to read off the nearest point's value.
+        self._readout = ClickReadout(self.canvas, lambda: [self.ax],
+                                     lambda: self._font_pt)
+
+    def _style(self):
+        self.ax.set_facecolor("#12121f")
+        self.ax.tick_params(colors="#aaaacc", labelsize=self._font_pt)
+        for sp in self.ax.spines.values():
+            sp.set_edgecolor("#3a3a5c")
+        # SI engineering ticks (24µ, 1.3m) instead of a 1e-5 offset at the top
+        eng_axis(self.ax.yaxis)
+
+    # ── Kerr-rotation display ────────────────────────────────────────────────
+    def set_kerr_state(self, state):
+        """Bind to the shared on/off state so every plot toggles together."""
+        self._kerr_state = state
+        if state is not None:
+            state.subscribe(self._on_kerr_state)
+        self._refresh_kerr_btn()
+
+    def kerr_enabled(self) -> bool:
+        return bool(self._kerr_state is not None and self._kerr_state.enabled)
+
+    def set_kerr_available(self, available: bool, why: str = ""):
+        """Whether the file(s) currently shown carry a usable calibration."""
+        self._kerr_available = bool(available)
+        self._kerr_why = why
+        self._refresh_kerr_btn()
+
+    def _on_kerr_clicked(self, checked: bool):
+        if self._kerr_state is not None:
+            self._kerr_state.set(checked)
+        else:
+            self._on_kerr_state(checked)
+
+    def _on_kerr_state(self, enabled: bool):
+        set_kerr_pill(self.kerr_btn, enabled)
+        self.kerr_changed.emit(bool(enabled))
+
+    def _refresh_kerr_btn(self):
+        enabled = self.kerr_enabled()
+        set_kerr_pill(self.kerr_btn, enabled)
+        self.kerr_btn.setEnabled(True)   # the toggle is global, not per file
+        if self._kerr_available:
+            self.kerr_btn.setToolTip(
+                "Show voltage channels as Kerr rotation instead of the raw\n"
+                "reading, using each file's own /data/calibration.\n"
+                f"{getattr(self, '_kerr_why', '')}".rstrip())
+        else:
+            self.kerr_btn.setToolTip(
+                "Show voltage channels as Kerr rotation instead of the raw\n"
+                "reading, using each file's own /data/calibration.\n"
+                "The selected file carries no usable λ/2 calibration, so it "
+                "is shown unconverted.")
+
+    def _on_fontsize(self, pt: int):
+        self._font_pt = int(pt)
+        self.ax.tick_params(labelsize=self._font_pt)
+        self.ax.xaxis.label.set_fontsize(self._font_pt)
+        self.ax.yaxis.label.set_fontsize(self._font_pt)
+        t = self.ax.get_title()
+        if t:
+            self.ax.set_title(t, color="#ccccff", fontsize=self._font_pt)
+        leg = self.ax.get_legend()
+        if leg is not None:
+            for txt in leg.get_texts():
+                txt.set_fontsize(self._font_pt)
+        if self._cb is not None:
+            self._cb.ax.tick_params(labelsize=self._font_pt)
+        self.canvas.draw_idle()
+
+    def clear(self):
+        if self._cb:
+            try: self._cb.remove()
+            except Exception: pass
+            self._cb = None
+        self._is_2d = False
+        self.ax.cla(); self._style()
+        if getattr(self, "_readout", None) is not None:
+            self._readout.note_axes_cleared()
+        self.canvas.draw_idle()
+
+    def plot_1d(self, datasets: List[Dict], title: str = ""):
+        """
+        Overlay multiple 1D datasets.
+        Each dataset: {x, y, x_label, y_label, legend, color?}
+        """
+        self.clear()
+        colors = LEFT_COLORS + RIGHT_COLORS
+        for i, ds in enumerate(datasets):
+            c = ds.get("color", colors[i % len(colors)])
+            self.ax.plot(ds["x"], ds["y"], color=c, linewidth=1.5,
+                         label=ds.get("legend", ds.get("y_label", f"#{i}")),
+                         marker=".", markersize=3)
+        if datasets:
+            self.ax.set_xlabel(
+                f"{datasets[0]['x_label']} ({datasets[0].get('x_unit','')})",
+                color="#aaaacc", fontsize=self._font_pt)
+            self.ax.set_ylabel(
+                f"{datasets[0]['y_label']} ({datasets[0].get('y_unit','')})",
+                color="#aaaacc", fontsize=self._font_pt)
+        if title:
+            self.ax.set_title(title, color="#ccccff", fontsize=self._font_pt)
+        self.ax.legend(fontsize=self._font_pt, facecolor="#313244",
+                       edgecolor="#45475a", labelcolor="#cdd6f4",
+                       loc="best")
+        self.canvas.draw_idle()
+
+    def plot_2d(self, data: np.ndarray, x_arr, y_arr,
+                x_label: str, y_label: str, sensor_label: str,
+                cmap: str = "RdBu_r"):
+        self.clear()
+        ext = [x_arr[0], x_arr[-1], y_arr[0], y_arr[-1]]
+        v   = data[np.isfinite(data)]
+        vmin = v.min() if len(v) else 0
+        vmax = v.max() if len(v) else 1
+        if vmin == vmax: vmax = vmin + 1e-12
+        # Diverging colormap + signed data → centre the colour range on zero
+        # so the neutral midpoint means "no signal"
+        if cmap in DIVERGING_CMAPS and vmin < 0.0 < vmax:
+            m = max(abs(vmin), abs(vmax))
+            vmin, vmax = -m, m
+        img = self.ax.imshow(data, origin="lower", aspect="auto",
+                             extent=ext, cmap=cmap, interpolation="nearest",
+                             vmin=vmin, vmax=vmax)
+        self._is_2d = True
+        self._cb = self.fig.colorbar(img, ax=self.ax)
+        self._cb.ax.yaxis.set_tick_params(color="#aaaacc", labelcolor="#aaaacc",
+                                          labelsize=self._font_pt)
+        eng_axis(self._cb.ax.yaxis)
+        self.ax.set_xlabel(x_label, color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_ylabel(y_label, color="#aaaacc", fontsize=self._font_pt)
+        self.ax.set_title(sensor_label, color="#ccccff", fontsize=self._font_pt)
+        self.canvas.draw_idle()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DataBrowserPanel — main panel for the bottom tabs
+# ─────────────────────────────────────────────────────────────────────────────
+class DataBrowserPanel(QWidget):
+    """
+    File browser + metadata preview + plot for past scans.
+    Designed to be added as a tab in MainWindow.bottom_tabs.
+    """
+    file_loaded = pyqtSignal(str)  # emits filepath when a scan is loaded
+    # Queued signals from the background indexer.  A plain thread must not touch
+    # widgets; a queued signal is delivered to the GUI thread unconditionally,
+    # where QTimer.singleShot from a non-Qt thread is version-dependent (§44).
+    _index_progress = pyqtSignal(int, int, int)  # token, files read, files to read
+    _index_done     = pyqtSignal(int, dict)      # token, sync() result summary
+
+    def __init__(self, save_dir_getter, parent=None):
+        """save_dir_getter: callable returning the current save directory path."""
+        super().__init__(parent)
+        self._save_dir_getter = save_dir_getter
+        self._loaded_files: Dict[str, ScanFile] = {}  # path → ScanFile
+        self._overlay_paths: List[str] = []  # paths selected for overlay
+        self._last_y_key: str = ""   # remember last viewed detector across files
+        self._autoplot_timer = QTimer(self)
+        self._autoplot_timer.setInterval(3000)
+        self._autoplot_timer.timeout.connect(self._autoplot_tick)
+        self._autoplot_timer.start()
+
+        # ── Metadata index ────────────────────────────────────────────────────
+        # Searching used to read metadata off disk: the filter expands every
+        # matching date folder, and expanding a folder opened every HDF5 in it
+        # on the GUI thread — one broad keystroke opened the whole archive
+        # (3.5 s for 3697 files, and growing monthly).  Now every file's
+        # searchable metadata is read once into an on-disk index and the search
+        # never opens anything; a re-sync is a stat walk (~6 ms) plus a real
+        # read of only the files that changed, i.e. the running scan.
+        self._index: Optional[scan_index.ScanIndex] = None
+        self._index_dir: str = ""
+        self._index_thread: Optional[threading.Thread] = None
+        self._index_stop: Optional[threading.Event] = None
+        # A sync is identified by a token so a superseded one (setup switched
+        # mid-index) can finish and save quietly without writing its progress
+        # into a panel that has moved on.
+        self._index_token: int = 0
+        self._index_progress.connect(self._on_index_progress)
+        self._index_done.connect(self._on_index_done)
+        # Debounce: the filter used to run on every keystroke over the whole
+        # tree.  One pass per typing pause is plenty and keeps the box smooth.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self._reapply_filter)
+
+        root = QHBoxLayout(self); root.setContentsMargins(4, 4, 4, 4); root.setSpacing(4)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # ── Left: file tree + controls ────────────────────────────────────────
+        left = QWidget(); left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(0, 0, 0, 0); left_l.setSpacing(4)
+
+        ctrl_row = QHBoxLayout()
+        refresh_btn = QPushButton("↻ Refresh"); refresh_btn.clicked.connect(self.refresh)
+        refresh_btn.setToolTip("Rescan the save directory for new HDF5 files")
+        ctrl_row.addWidget(refresh_btn)
+        browse_btn = QPushButton("📂 Open…"); browse_btn.clicked.connect(self._open_file)
+        browse_btn.setToolTip("Load a specific HDF5 scan file from anywhere on the filesystem")
+        ctrl_row.addWidget(browse_btn)
+        # Re-read and re-draw whatever is currently plotted, on a timer.  The
+        # file list already refreshes when a scan finishes, but a scan that is
+        # still RUNNING keeps growing on disk — so overlaying the live scan on
+        # an older one used to need a manual click to see each new point.
+        # Re-plots only; the tree and the selection are left alone.
+        self.autoplot_cb = QCheckBox("Live")
+        self.autoplot_cb.setChecked(True)
+        self.autoplot_cb.setToolTip(
+            "Re-read and re-draw the plotted file(s) every few seconds, so a\n"
+            "scan that is still running keeps updating — including when it is\n"
+            "overlaid on an older scan. Does not touch the file list or your\n"
+            "selection.")
+        ctrl_row.addWidget(self.autoplot_cb)
+        ctrl_row.addStretch()
+        left_l.addLayout(ctrl_row)
+
+        # ── Search ────────────────────────────────────────────────────────────
+        # There was no way to find a scan except expanding date folders by hand,
+        # which gets worse every month.  Matches the filename and the metadata
+        # already loaded for a file (sample, operator, notes, config name,
+        # scan type), so "wu89" or "PMOKE" narrows the tree immediately.
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search  (sample, notes, operator, date, filename…)")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._on_search_text)
+        self.search_edit.setToolTip(
+            "Filter the file tree. Matches the filename plus the sample, operator,\n"
+            "notes, device, scan name/type, incidence and polarization recorded in\n"
+            "the file. Space-separated terms must all match.\n"
+            "\n"
+            "Dates work too, year first: 20260608 or 2026-06-08 for one day,\n"
+            "202606 or 2026-06 for a month, 2026 for a year.  '2026-06 pmoke'\n"
+            "narrows that month to the PMOKE scans.\n"
+            "\n"
+            "Searches every date folder, open or not — no file is opened to do it.")
+        left_l.addWidget(self.search_edit)
+
+        # Indexing progress.  Hidden unless a sync is actually doing work, so
+        # the usual case (nothing changed) shows nothing at all.
+        self.index_lbl = QLabel("")
+        self.index_lbl.setStyleSheet("color:#6c7086;font-size:10px;")
+        self.index_lbl.setVisible(False)
+        left_l.addWidget(self.index_lbl)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["File", "Status", "Points"])
+        self.tree.setColumnWidth(0, 180)
+        self.tree.setColumnWidth(1, 60)
+        self.tree.setColumnWidth(2, 60)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self.tree.itemSelectionChanged.connect(self._on_selection)
+        self.tree.itemSelectionChanged.connect(self._update_overlay_btn)
+        self.tree.itemExpanded.connect(self._on_date_expanded)
+        left_l.addWidget(self.tree, stretch=1)
+
+        # Overlay button
+        ov_row = QHBoxLayout()
+        self.overlay_btn = QPushButton("📊 Overlay selected")
+        self.overlay_btn.clicked.connect(self._overlay_selected)
+        self.overlay_btn.setEnabled(False)
+        self.overlay_btn.setToolTip(
+            "Plot all selected scan files on the same graph for direct comparison.\n"
+            "Select multiple files with Ctrl+click or Shift+click.")
+        ov_row.addWidget(self.overlay_btn)
+        left_l.addLayout(ov_row)
+
+        # Column selectors
+        self._populating_combos = False
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel("X:"))
+        self.x_combo = QComboBox(); self.x_combo.setMinimumWidth(90)
+        self.x_combo.currentIndexChanged.connect(self._on_combo_changed)
+        sel_row.addWidget(self.x_combo, stretch=1)
+        sel_row.addWidget(QLabel("Y:"))
+        self.y_combo = QComboBox(); self.y_combo.setMinimumWidth(90)
+        self.y_combo.currentIndexChanged.connect(self._on_combo_changed)
+        sel_row.addWidget(self.y_combo, stretch=1)
+        # 2D-map mode: render the selected Y channel as a colour map.  Enabled
+        # only for 2D scans; when on, the Y combo picks which channel is shown
+        # and the map re-renders live instead of collapsing to a 1D plot.
+        self.map2d_cb = QCheckBox("2D map")
+        self.map2d_cb.setToolTip(
+            "Show the selected Y channel as a 2D colour map (2D scans only).\n"
+            "Uncheck for a 1D line plot of the selected X/Y columns.")
+        self.map2d_cb.setEnabled(False)
+        self.map2d_cb.toggled.connect(self._on_combo_changed)
+        sel_row.addWidget(self.map2d_cb)
+        # Colormap picker — applies to 2D colour maps.
+        sel_row.addWidget(QLabel("Cmap:"))
+        self.cmap_combo = QComboBox(); self.cmap_combo.setMinimumWidth(90)
+        for cm in COLORMAPS:
+            self.cmap_combo.addItem(cm)
+        self.cmap_combo.setToolTip("Colormap for 2D colour maps")
+        # Connect after populating so filling the list doesn't trigger a re-plot.
+        self.cmap_combo.currentIndexChanged.connect(self._on_combo_changed)
+        sel_row.addWidget(self.cmap_combo)
+        plot_btn = QPushButton("Plot"); plot_btn.clicked.connect(self._plot_current)
+        plot_btn.setToolTip("Plot the selected columns (or 2D map) from the current scan file")
+        sel_row.addWidget(plot_btn)
+        left_l.addLayout(sel_row)
+
+        splitter.addWidget(left)
+
+        # ── Middle: metadata ──────────────────────────────────────────────────
+        # Its own splitter column rather than stacked under the tree: it used
+        # to be capped at 240 px at the bottom of the left column, which both
+        # truncated the metadata (there is a lot more of it since the raw
+        # attributes were added) and stole height from the file list.  Here
+        # both get the full height of the tab, and the divider is draggable.
+        meta_grp = QGroupBox("Metadata")
+        meta_l = QVBoxLayout(meta_grp); meta_l.setContentsMargins(6, 6, 6, 6)
+        self.meta_text = QTextEdit(); self.meta_text.setReadOnly(True)
+        self.meta_text.setStyleSheet(
+            "QTextEdit{background:#12121f;border:1px solid #313244;"
+            "border-radius:4px;color:#a6e3a1;font-family:'Courier New',monospace;"
+            "font-size:10px;}")
+        meta_l.addWidget(self.meta_text)
+        meta_grp.setMinimumWidth(230)
+        splitter.addWidget(meta_grp)
+
+        # ── Right: plot ───────────────────────────────────────────────────────
+        self.plot = BrowserPlotWidget()
+        # Flipping the θ pill re-reads the file and re-plots in the new unit.
+        self.plot.kerr_changed.connect(lambda _on: self._replot())
+        splitter.addWidget(self.plot)
+        splitter.setSizes([300, 300, 520])
+        splitter.setStretchFactor(0, 0)     # file list keeps its width
+        splitter.setStretchFactor(1, 0)     # metadata keeps its width
+        splitter.setStretchFactor(2, 1)     # the plot takes the extra space
+
+        root.addWidget(splitter)
+
+    # ── Metadata index ────────────────────────────────────────────────────────
+    def _ensure_index(self, base: str):
+        """Create/load the index for `base`, reusing it while the dir is the same."""
+        if self._index is not None and self._index_dir == base:
+            return self._index
+        self._stop_indexing()
+        try:
+            cache = scan_index.index_path(base, CONFIG_DIR)
+        except Exception:
+            cache = None
+        self._index = scan_index.ScanIndex(base, cache)
+        self._index_dir = base
+        try:
+            self._index.load()
+        except Exception:
+            pass                      # a bad cache is just an empty one
+        return self._index
+
+    def _start_indexing(self):
+        """Bring the index up to date on a worker thread.
+
+        Only files whose mtime/size changed are opened, so after the first run
+        this is a stat walk and a no-op — except for a scan still being written,
+        which is exactly the file whose row should keep updating.
+        """
+        idx = self._index
+        if idx is None:
+            return
+        if self._index_thread is not None and self._index_thread.is_alive():
+            return                    # one sync at a time; refresh() re-runs later
+        self._index_token += 1
+        token = self._index_token
+        stop = threading.Event()      # per-sync, so stopping one cannot un-stop another
+        self._index_stop = stop
+
+        def _work():
+            try:
+                res = idx.sync(
+                    progress_cb=lambda d, t: self._index_progress.emit(token, d, t),
+                    should_stop=stop.is_set)
+            except Exception as e:
+                res = {"error": str(e), "read": 0, "total": 0,
+                       "removed": 0, "indexed": len(idx.entries), "stopped": False}
+            self._index_done.emit(token, res)
+
+        self._index_thread = threading.Thread(target=_work, daemon=True,
+                                              name="samba-scan-index")
+        self._index_thread.start()
+
+    def _stop_indexing(self):
+        """Ask a running sync to finish early (panel closing, directory switch).
+
+        Deliberately does not join: the worker checks between files, so it exits
+        within about a millisecond, and it still saves what it read — while the
+        GUI thread carries straight on instead of waiting on a disk read.
+        """
+        if self._index_stop is not None:
+            self._index_stop.set()
+        self._index_stop = None
+        self._index_thread = None
+
+    def _on_index_progress(self, token: int, done: int, total: int):
+        if token != self._index_token:
+            return                    # a superseded sync winding down
+        self.index_lbl.setText(f"Indexing metadata…  {done} / {total}")
+        self.index_lbl.setVisible(True)
+
+    def _on_index_done(self, token: int, res: dict):
+        if token != self._index_token:
+            return
+        if res.get("error"):
+            self.index_lbl.setText(f"Indexing failed: {res['error'][:60]}")
+            self.index_lbl.setVisible(True)
+            return
+        self.index_lbl.setVisible(False)
+        if res.get("read") or res.get("removed"):
+            self._fill_rows_from_index()   # newly-read rows lose their "…"
+            txt = self.search_edit.text()
+            if txt.strip():                # and can now match a live search
+                self._apply_filter(txt)
+
+    def _fill_rows_from_index(self):
+        """Fill every still-unknown row's Status/Points from the index."""
+        idx = self._index
+        if idx is None:
+            return
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                date_item = self.tree.topLevelItem(i)
+                for j in range(date_item.childCount()):
+                    item = date_item.child(j)
+                    if item.text(1) not in ("…", ""):
+                        continue
+                    fp = item.data(0, Qt.ItemDataRole.UserRole)
+                    if fp:
+                        self._fill_item_from_index(item, idx.get(fp))
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+    # ── File discovery ────────────────────────────────────────────────────────
+    def refresh(self):
+        """Scan the save directory and populate the tree."""
+        self.tree.clear()
+        self._loaded_files.clear()
+        base = os.path.expanduser(self._save_dir_getter())
+
+        if not os.path.isdir(base):
+            placeholder = QTreeWidgetItem(["No save directory found", "", ""])
+            placeholder.setForeground(0, QColor("#6c7086"))
+            self.tree.addTopLevelItem(placeholder)
+            return
+
+        # Find date directories (YYYYMMDD pattern)
+        date_dirs = sorted(
+            [d for d in os.listdir(base)
+             if os.path.isdir(os.path.join(base, d)) and len(d) == 8 and d.isdigit()],
+            reverse=True
+        )
+
+        # Every row is filled from the index, so no HDF5 is opened here and
+        # every folder — open or collapsed — is complete and searchable.  A
+        # file the index has not seen yet (first run, or a scan written
+        # seconds ago) shows "…" until the background sync reaches it.
+        idx = self._ensure_index(base)
+
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for dd in date_dirs:
+                date_path = os.path.join(base, dd)
+                h5_files = sorted(glob.glob(os.path.join(date_path, "*.h5")), reverse=True)
+                if not h5_files:
+                    continue
+
+                # Format date nicely
+                try:
+                    date_label = datetime.strptime(dd, "%Y%m%d").strftime("%Y-%m-%d (%a)")
+                except Exception:
+                    date_label = dd
+
+                date_item = QTreeWidgetItem([date_label, "", f"{len(h5_files)} files"])
+                self.tree.addTopLevelItem(date_item)
+
+                for fp in h5_files:
+                    item = QTreeWidgetItem([os.path.basename(fp), "…", ""])
+                    item.setData(0, Qt.ItemDataRole.UserRole, fp)
+                    item.setForeground(1, QColor("#6c7086"))
+                    self._fill_item_from_index(item, idx.get(fp) if idx else None)
+                    date_item.addChild(item)
+                date_item.setExpanded(dd == date_dirs[0])   # after children exist
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+        if self.tree.topLevelItemCount() == 0:
+            placeholder = QTreeWidgetItem(["No scans found", "", ""])
+            placeholder.setForeground(0, QColor("#6c7086"))
+            self.tree.addTopLevelItem(placeholder)
+            return
+
+        self._start_indexing()
+
+    @staticmethod
+    def _set_row_status(item, status: str, pts_acq, pts_plan):
+        """Set the Status/Points columns + colour coding on one row."""
+        item.setText(1, status)
+        item.setText(2, f"{pts_acq}/{pts_plan}")
+        if status == "completed":
+            item.setForeground(1, QColor("#a6e3a1"))
+        elif status == "aborted":
+            item.setForeground(1, QColor("#fab387"))
+        elif status == "running":
+            item.setForeground(1, QColor("#f38ba8"))
+        else:
+            item.setForeground(1, QColor("#6c7086"))
+
+    @classmethod
+    def _fill_item_from_index(cls, item, entry: Optional[Dict]):
+        """Set the status/points columns from an index entry.
+
+        `None` means the file is not indexed yet (leave the "…" placeholder) or
+        could not be read at all — marked "?" and made unclickable, as before.
+        """
+        if entry is None:
+            return
+        if not entry.get("ok"):
+            item.setText(1, "?")
+            item.setForeground(0, QColor("#6c7086"))
+            item.setData(0, Qt.ItemDataRole.UserRole, None)   # unclickable
+            return
+        cls._set_row_status(item, entry.get("scan_status", "?"),
+                            entry.get("points_acquired", 0),
+                            entry.get("points_planned", 0))
+
+    def _get_scanfile(self, fp: str):
+        """Return the cached ScanFile for `fp`, loading it lazily on first use.
+        Returns None when the file can't be read."""
+        sf = self._loaded_files.get(fp)
+        if sf is None:
+            sf = ScanFile(fp)
+            if not sf.valid:
+                return None
+            self._loaded_files[fp] = sf
+        return sf
+
+    def _reapply_filter(self):
+        """Debounce tick: run the search the operator has just finished typing."""
+        txt = self.search_edit.text() if hasattr(self, 'search_edit') else ''
+        self._apply_filter(txt, restore_tree=True)
+
+    def _on_search_text(self, _text: str = ""):
+        """Restart the debounce timer — the filter runs once the typing stops."""
+        self._search_timer.start()
+
+    def _on_date_expanded(self, date_item):
+        """Fill in any rows still waiting on the index when a folder is opened.
+
+        Reads nothing: expanding a folder used to open every HDF5 in it, which
+        is what made a search freeze the app.  A row still showing "…" here is
+        one the background sync has not reached yet, and it fills in by itself
+        when the sync finishes.
+        """
+        idx = self._index
+        if idx is None:
+            return
+        for i in range(date_item.childCount()):
+            item = date_item.child(i)
+            if item.text(1) != "…":
+                continue                       # already populated
+            fp = item.data(0, Qt.ItemDataRole.UserRole)
+            if fp:
+                self._fill_item_from_index(item, idx.get(fp))
+
+    # ── Search / filter ───────────────────────────────────────────────────────
+    def _match_terms(self, fp: str, item, terms) -> bool:
+        """True when every term appears in this file's indexed text.
+
+        A pure dict lookup — no file is opened, so every date folder is searched
+        by its full metadata whether or not it has ever been expanded.
+        """
+        if self._index is not None:
+            return self._index.matches(fp, terms, fallback_name=item.text(0))
+        blob = item.text(0).lower()
+        return all(t in blob for t in terms)
+
+    def _apply_filter(self, text: str = "", restore_tree: bool = False):
+        """Show only files matching the search box; hide empty date folders.
+
+        `restore_tree` collapses back to the opening state when the search is
+        cleared.  Off by default so a background index update re-running the
+        filter cannot collapse a folder the operator opened by hand.
+        """
+        terms = scan_index.split_terms(text)
+        # Expanding and hiding thousands of rows one at a time repaints the tree
+        # on every call; batch the whole pass into one update.
+        self.tree.setUpdatesEnabled(False)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                date_item = self.tree.topLevelItem(i)
+                shown = 0
+                for j in range(date_item.childCount()):
+                    child = date_item.child(j)
+                    fp = child.data(0, Qt.ItemDataRole.UserRole)
+                    ok = True if not terms else self._match_terms(fp, child, terms)
+                    child.setHidden(not ok)
+                    shown += 1 if ok else 0
+                date_item.setHidden(bool(terms) and shown == 0)
+                if terms:
+                    if shown:
+                        date_item.setExpanded(True)
+                elif restore_tree:
+                    # Cleared search: back to the opening state — newest folder
+                    # open, the rest collapsed — instead of every month expanded.
+                    date_item.setExpanded(i == 0)
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+    def closeEvent(self, event):
+        self._stop_indexing()
+        super().closeEvent(event)
+
+    def _replot(self):
+        """Re-draw whatever is currently shown (single file or overlay)."""
+        sel = [i for i in self.tree.selectedItems()
+               if i.data(0, Qt.ItemDataRole.UserRole)]
+        if len(sel) > 1:
+            self._overlay_selected()
+        else:
+            self._plot_current()
+
+    def _autoplot_tick(self):
+        """Re-draw the current plot so a running scan keeps updating."""
+        cb = getattr(self, 'autoplot_cb', None)
+        if cb is None or not cb.isChecked() or not self.isVisible():
+            return
+        try:
+            if any(i.data(0, Qt.ItemDataRole.UserRole)
+                   for i in self.tree.selectedItems()):
+                self._replot()
+        except Exception:
+            pass        # a file being written can fail a read; try again next tick
+
+    def _update_overlay_btn(self):
+        """Enable overlay button only when at least one file is selected."""
+        n = sum(1 for i in self.tree.selectedItems()
+                if i.data(0, Qt.ItemDataRole.UserRole))
+        self.overlay_btn.setEnabled(n > 0)
+        self.overlay_btn.setToolTip(
+            f"Plot {n} selected scan(s) on one graph" if n > 0
+            else "Select one or more scans first")
+
+    def _open_file(self):
+        """Open a specific HDF5 file from anywhere."""
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "Open HDF5 scan", os.path.expanduser("~"),
+            "HDF5 files (*.h5 *.hdf5);;All files (*)")
+        if not fp:
+            return
+        sf = ScanFile(fp)
+        if not sf.valid:
+            QMessageBox.warning(self, "Error", f"Could not read:\n{fp}")
+            return
+        self._loaded_files[fp] = sf
+        self._show_file(sf)
+
+    # ── Selection handling ────────────────────────────────────────────────────
+    def _on_selection(self):
+        items = self.tree.selectedItems()
+        # Show metadata for the last selected file.  The full ScanFile is read
+        # here, on demand, for the one file being looked at — the tree itself
+        # is populated from the index and opens nothing.
+        for item in reversed(items):
+            fp = item.data(0, Qt.ItemDataRole.UserRole)
+            if not fp:
+                continue
+            sf = self._get_scanfile(fp)
+            if sf is not None:
+                self._show_file(sf)
+                return
+
+    def _show_file(self, sf: ScanFile):
+        """Display metadata and populate column combos."""
+        m = sf.meta
+        is_dc = m.get("is_dc_hyst", False)
+        # Tell the θ pill whether this file can be converted at all.
+        self.plot.set_kerr_available(sf.kerr.ok, sf.kerr.describe())
+        status_icon = {"completed": "✓", "aborted": "⚠", "running": "⏳"}.get(
+            m["scan_status"], "?")
+
+        lines = [
+            f"Date:     {m['timestamp'][:19]}" if m["timestamp"] else "",
+            f"Name:     {m['scan_name']}",
+            f"Type:     {m['scan_type']}",
+            f"Status:   {status_icon} {m['scan_status']}",
+        ]
+        if is_dc:
+            lines += [
+                f"Field:    {m.get('MagneticField_A', float('nan')):.3f} A  "
+                f"× {m.get('NumberOfPoints', 0)} pts/half  "
+                f"× {m.get('Cycles', 0)} cycles",
+                f"Int.time: {m['integration_time']:.3g} s/half-loop",
+                f"Points:   {m['points_acquired']} / {m.get('n_x', 0)}",
+                f"Duration: {m.get('duration_seconds', 0):.1f} s",
+                f"Channels: {', '.join(sf.sensor_labels.values())}",
+            ]
+            # Scalar results — only shown if finite
+            def _fmtval(v, fmt=".3f"):
+                return f"{v:{fmt}}" if np.isfinite(v) else "—"
+            hc     = m.get("Hc",     float("nan"))
+            hshift = m.get("Hshift", float("nan"))
+            mr     = m.get("Mr",     float("nan"))
+            ms     = m.get("Ms",     float("nan"))
+            lines += [
+                f"Hc:       {_fmtval(hc)} mT",
+                f"Hshift:   {_fmtval(hshift)} mT",
+                f"Mr:       {_fmtval(mr, '.4g')}",
+                f"Ms:       {_fmtval(ms, '.4g')}",
+            ]
+        else:
+            lines += [
+                f"Grid:     {m['n_x']}×{m['n_y']}",
+                f"Points:   {m['points_acquired']} / {m['points_planned']}",
+                f"Time:     {m.get('duration_seconds', 0):.1f} s",
+                f"Int/Sett: {m['integration_time']:.3f} / {m['settle_time']:.3f} s",
+                f"Sensors:  {', '.join(sf.sensor_labels.values())}",
+            ]
+        if m.get("operator"):  lines.append(f"Operator: {m['operator']}")
+        if m.get("sample_id"): lines.append(f"Sample:   {m['sample_id']}")
+        if m.get("notes"):     lines.append(f"Notes:    {m['notes']}")
+        if m.get("geometry") or m.get("stage_type"):
+            parts = []
+            if m.get("geometry"):   parts.append(m["geometry"])
+            if m.get("stage_type"): parts.append(m["stage_type"])
+            lines.append(f"Geometry: {' / '.join(parts)}")
+
+        def _gfmt(v): return f"{v:.4g}" if isinstance(v, (int, float)) else str(v)
+
+        # Temperature sweep range (temp sweeps only — suppress redundant field step)
+        if m.get("is_temp_sweep"):
+            t0 = m.get("temp_sweep_start_K", "?")
+            t1 = m.get("temp_sweep_stop_K",  "?")
+            ts = m.get("temp_sweep_step_K",  "?")
+            lines.append(f"Temp range: {_gfmt(t0)} → {_gfmt(t1)} K  (step {_gfmt(ts)} K)")
+
+        # Field scan range (real field scans only)
+        is_field_scan = (m.get("scan_type") == "FIELD")
+        if is_field_scan:
+            segs_json = m.get("field_segments_json", "")
+            if segs_json:
+                try:
+                    import json as _json
+                    segs = _json.loads(segs_json)
+                    f0 = segs[0][0];  f1 = segs[-1][1]
+                    step = m.get("field_step_A")
+                    step_str = f"  (step {_gfmt(step)} A)" if step is not None else ""
+                    lines.append(f"Field range: {_gfmt(f0)} → {_gfmt(f1)} A{step_str}")
+                except Exception:
+                    if m.get("field_step_A") is not None:
+                        lines.append(f"Field step: {_gfmt(m['field_step_A'])} A")
+
+        # Spatial step sizes
+        step_rows = []
+        for key, label in (("act1_step", "Act1 step"), ("act2_step", "Act2 step")):
+            v = m.get(key)
+            if v is not None and v != "":
+                step_rows.append(f"{label}: {_gfmt(v)}")
+        if step_rows:
+            lines.append("─" * 28)
+            lines.extend(step_rows)
+
+        # Hardware snapshot
+        _HW_DISPLAY = [
+            ("hw_keithley_amplitude_mA", "Keithley amp",   "mA"),
+            ("hw_keithley_frequency_Hz", "Keithley freq",  "Hz"),
+            ("hw_keithley_current_mA",   "Keithley I out", "mA"),
+            ("hw_keithley_range",        "Keithley range", ""),
+            ("hw_keithley_compliance_V", "Keithley compl", "V"),
+            ("hw_zi_tc_s",               "ZI TC",          "s"),
+            ("hw_zi_order",              "ZI order",       ""),
+            ("hw_zi_settling_s",         "ZI settling",    "s"),
+            ("hw_relay_state",           "Relay",          ""),
+            ("hw_field_mT",              "Field @start",   "mT"),
+            ("hw_magnet_current_A",      "Magnet I @start","A"),
+            ("hw_temperature_K",         "Temp @start",    "K"),
+            ("hw_vti_temp_K",            "VTI temp",       "K"),
+            ("hw_magnet_temp_K",         "Magnet temp",    "K"),
+            ("hw_act1_pos",              "Act1 @start",    ""),
+            ("hw_act2_pos",              "Act2 @start",    ""),
+        ]
+        hw_rows = []
+        for key, label, unit in _HW_DISPLAY:
+            v = m.get(key)
+            if v is not None and v != "":
+                val = f"{v:.4g}" if isinstance(v, (int, float)) else str(v)
+                hw_rows.append(f"{label}: {val}{' ' + unit if unit else ''}")
+        if hw_rows:
+            lines.append("─" * 28)
+            lines.append("Hardware at scan start:")
+            lines.extend(hw_rows)
+
+        # λ/2 calibration — a dataset, not a /metadata attr, so the catch-all
+        # below never sees it.  It is what the θ (Kerr rotation) pill uses.
+        if sf.bd_calibration:
+            lines.append("─" * 28)
+            lines.append("λ/2 calibration (mV at ticks 0,5,10,15,20,25):")
+            lines.append("  " + ", ".join(f"{v:.2f}" for v in sf.bd_calibration))
+            lines.append(f"  → {sf.kerr.sln:+.4g} µrad/mV" if sf.kerr.ok
+                         else "  → not usable as a calibration")
+
+        # Everything else in /metadata.  The sections above are a curated
+        # display order; this catch-all guarantees that anything written to the
+        # file is visible here, instead of silently dropping whatever is not on
+        # the hand-maintained list (incidence, polarization, mirror shift, the
+        # thicknesses, software provenance, ...).
+        other = []
+        for key in sorted(sf.raw_meta):
+            if key in _SKIP_RAW_META:
+                continue
+            v = sf.raw_meta[key]
+            if isinstance(v, (bool, np.bool_)):
+                txt = "yes" if v else "no"
+            elif isinstance(v, (int, float, np.integer, np.floating)):
+                txt = f"{v:.6g}"
+            else:
+                txt = str(v)
+                if len(txt) > 120:
+                    txt = txt[:117] + "…"
+            if txt == "" or txt == "nan":
+                continue
+            other.append(f"{key}: {txt}")
+        if other:
+            lines.append("─" * 28)
+            lines.append("Other metadata:")
+            lines.extend(other)
+
+        self.meta_text.setPlainText("\n".join(l for l in lines if l))
+
+        # Populate column combos (guard auto-replot while we rebuild them)
+        self._populating_combos = True
+        cols = sf.list_columns()
+        self.x_combo.clear(); self.y_combo.clear()
+        for key, lbl in cols:
+            self.x_combo.addItem(lbl, key)
+            self.y_combo.addItem(lbl, key)
+        # Point-by-point option: plot the signal vs. sample index (1, 2, 3, …)
+        # with nothing meaningful on the x-axis.
+        self.x_combo.addItem("Index (point #)", INDEX_KEY)
+
+        # Smart defaults — find the x-axis dataset key by role for new files,
+        # fall back to known names for old files
+        x_default = None
+        for i in range(self.x_combo.count()):
+            key = self.x_combo.itemData(i)
+            if key and (key.startswith("actuator_") or key in ("field_mT", "x_actual", "time")):
+                x_default = key; break
+        if is_dc and x_default is None:
+            x_default = "field_mT"
+        # Prefer the detector the user last looked at (sticky across files) if
+        # this file also has it; otherwise fall back to the first sensor.
+        y_default = ""
+        if self._last_y_key:
+            for i in range(self.y_combo.count()):
+                if self.y_combo.itemData(i) == self._last_y_key:
+                    y_default = self._last_y_key; break
+        if not y_default:
+            y_default = sf.sensor_keys[0] if sf.sensor_keys else ""
+        if x_default:
+            for i in range(self.x_combo.count()):
+                if self.x_combo.itemData(i) == x_default:
+                    self.x_combo.setCurrentIndex(i); break
+        for i in range(self.y_combo.count()):
+            if self.y_combo.itemData(i) == y_default:
+                self.y_combo.setCurrentIndex(i); break
+
+        # 2D-map mode is available only for non-DC scans with a real Y axis.
+        is_2d = (not is_dc) and m["n_y"] > 1
+        self.map2d_cb.blockSignals(True)
+        self.map2d_cb.setEnabled(is_2d)
+        self.map2d_cb.setChecked(is_2d)   # default to the map for 2D scans
+        self.map2d_cb.blockSignals(False)
+        self._populating_combos = False
+
+        # Auto-plot in the resolved mode (DC/1D → line, 2D → colour map)
+        self._plot_current()
+
+    def _on_combo_changed(self, *_):
+        """Live re-plot when the user changes a column selector or the 2D-map
+        toggle — but not while the combos are being repopulated in _show_file."""
+        if self._populating_combos:
+            return
+        # Remember the chosen detector so the next file opened defaults to it
+        yk = self.y_combo.currentData()
+        if yk:
+            self._last_y_key = yk
+        self._plot_current()
+
+    # ── Kerr-rotation conversion (display only — files are never rewritten) ──
+    def _kerr_convert_1d(self, items: List[Tuple["ScanFile", Dict]]) -> bool:
+        """Convert the y (and any sensor x) of each dataset to Kerr rotation.
+
+        Each file is converted with **its own** ``/data/calibration``, so an
+        overlay of scans taken under different calibrations is still correct;
+        the µrad/nrad choice is then made once across all of them so the shared
+        axis reads in one unit.  Returns True if anything was converted.
+        """
+        if not self.plot.kerr_enabled() or not items:
+            return False
+        did = False
+        for key, ukey in (("y", "y_unit"), ("x", "x_unit")):
+            factors, peak = [], 0.0
+            for sf, r in items:
+                f = sf.kerr.factor(r.get(ukey, ""))
+                factors.append(f)
+                if f is None:
+                    continue
+                arr = np.asarray(r.get(key), dtype=float)
+                fin = arr[np.isfinite(arr)] if arr.size else arr
+                if fin.size:
+                    peak = max(peak, float(np.max(np.abs(fin))) * abs(f))
+            if not any(f is not None for f in factors):
+                continue
+            unit = kerr.resolve_display_unit(peak)
+            scale = kerr.display_scale(unit)
+            for (sf, r), f in zip(items, factors):
+                if f is None:
+                    continue
+                r[key] = np.asarray(r[key], dtype=float) * (f * scale)
+                r[ukey] = unit
+                did = True
+        return did
+
+    def _kerr_convert_2d(self, sf: "ScanFile", result: Dict) -> bool:
+        """Same for a colour map — one sensor, so one unit."""
+        if not self.plot.kerr_enabled():
+            return False
+        f = sf.kerr.factor(result.get("sensor_unit", ""))
+        if f is None:
+            return False
+        data = np.asarray(result["data"], dtype=float)
+        fin = data[np.isfinite(data)]
+        peak = float(np.max(np.abs(fin))) * abs(f) if fin.size else 0.0
+        unit = kerr.resolve_display_unit(peak)
+        result["data"] = data * (f * kerr.display_scale(unit))
+        result["sensor_label"] = f"{result.get('sensor_label', '')} ({unit})"
+        return True
+
+    def _plot_current(self):
+        """Plot with the user's column selection — a 2D colour map when the
+        2D-map toggle is on, otherwise a 1D line plot."""
+        # Find the last selected file
+        fp, sf = None, None
+        for item in reversed(self.tree.selectedItems()):
+            candidate = item.data(0, Qt.ItemDataRole.UserRole)
+            if not candidate:
+                continue
+            sf = self._get_scanfile(candidate)
+            if sf is not None:
+                fp = candidate
+                break
+        if not fp:
+            # Do not write plot status into the metadata panel: it replaces
+            # the metadata the user is reading, and with the live re-plot
+            # timer it can fire while they are looking at it.
+            self.plot.clear()
+            return
+        x_key = self.x_combo.currentData()
+        y_key = self.y_combo.currentData()
+        is_dc = sf.meta.get("is_dc_hyst", False)
+
+        # ── 2D colour map of the selected Y channel ───────────────────────────
+        # Index mode is inherently a 1D point-by-point plot — skip the map.
+        if (x_key != INDEX_KEY and
+                self.map2d_cb.isEnabled() and self.map2d_cb.isChecked() and not is_dc):
+            sensor_key = y_key or "auto"
+            result = sf.read_2d(sensor_key=sensor_key)
+            if result and np.asarray(result["data"]).ndim == 2:
+                self._kerr_convert_2d(sf, result)
+                self.plot.plot_2d(result["data"], result["x_arr"], result["y_arr"],
+                                  result["x_label"], result["y_label"],
+                                  result["sensor_label"],
+                                  cmap=self.cmap_combo.currentText())
+            else:
+                self.meta_text.append("\n⚠ Could not read a 2D map for the selected channel.")
+            return
+
+        # ── 1D line plot ──────────────────────────────────────────────────────
+        if not y_key or (not x_key and not is_dc):
+            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
+            return
+        if is_dc:
+            # DC plots vs. Field by default; honour Index mode if chosen.
+            result = sf.read_1d(INDEX_KEY if x_key == INDEX_KEY else "auto", y_key)
+        else:
+            result = sf.read_1d(x_key, y_key)
+        if result:
+            result["legend"] = sf.basename
+            self._kerr_convert_1d([(sf, result)])
+            self.plot.plot_1d([result], title=sf.meta["scan_name"])
+        else:
+            self.meta_text.append("\n⚠ Could not read selected columns from file.")
+
+    def _overlay_selected(self):
+        """Overlay all selected scan files on one 1D plot."""
+        items = self.tree.selectedItems()
+        datasets = []
+        pairs = []
+        title_parts = []
+        for item in items:
+            fp = item.data(0, Qt.ItemDataRole.UserRole)
+            sf = self._get_scanfile(fp) if fp else None
+            if sf is not None:
+                x_key = self.x_combo.currentData() or "auto"
+                y_key = self.y_combo.currentData() or "auto"
+                result = sf.read_1d(x_key, y_key)
+                if result:
+                    result["legend"] = sf.basename
+                    datasets.append(result)
+                    pairs.append((sf, result))
+                    if sf.meta["scan_name"] not in title_parts:
+                        title_parts.append(sf.meta["scan_name"])
+
+        if datasets:
+            self._kerr_convert_1d(pairs)
+            self.plot.plot_1d(datasets, title=f"Overlay: {', '.join(title_parts[:3])}")
+        else:
+            QMessageBox.information(self, "No data",
+                "Select one or more scan files (not date folders) to overlay.")
