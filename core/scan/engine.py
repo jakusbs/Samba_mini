@@ -78,6 +78,9 @@ class RunRequest:
     #: Samba's further metadata fields (device_id, incidence, mirror_shift, polarization, lam2, lam4,
     #: noDC, r_4wire_ohm, r_2wire_ohm, fm_thickness_nm, t_stack_nm) -> /metadata, same keys as Samba
     extra_metadata: dict = field(default_factory=dict)
+    #: Samba's λ/2 (BD) calibration: six mV values at ticks 0, 5, 10, 15, 20, 25 -> /data/calibration
+    #: (all zeros = no calibration, not written, as in Samba)
+    bd_calibration: list | None = None
 
 
 @dataclass
@@ -473,6 +476,10 @@ class ScanEngine:
         root = dict(root, scan_type=self.wf.scan_type, mode=self.mode)
         self._writer = ScanWriter(self.path, shape, specs, root, metadata)
         self._writer.create()
+        cal = [float(v) for v in (self.req.bd_calibration or [])]
+        if len(cal) == 6 and any(v != 0.0 for v in cal):
+            self._writer.add_static("calibration", cal, unit="mV", role="calibration",
+                                    label="λ/2 calibration (ticks 0, 5, 10, 15, 20, 25)")
         self._log("info", f"Saving to {self.path}" + (" (SIMULATION)" if simulated else ""))
 
     def _write(self, index: tuple, values: dict, group: str = "data", count: bool = True) -> None:

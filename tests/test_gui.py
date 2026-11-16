@@ -263,3 +263,41 @@ def test_scanlist_runs_n_scans_with_field_flip(qapp, service, tmp_path):
     coils = [json.loads(read_file(r[0])["metadata"]["params_json"])["b"] for r in rows]
     assert coils == [0.2, -0.2, -0.2]
     w.close()
+
+
+def test_bd_calibration_per_setup_reaches_runs(qapp, service, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    from core.gui.bridge import ServiceBridge
+    from core.storage.hdf5_writer import read_file
+    from Samba_mini.app import MainWindow
+
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    w.dir_edit.setText(str(tmp_path / "data"))
+    cal = [-4.0, -2.5, -0.5, 1.0, 2.5, 4.5]
+    w.bd_panel.load_calibration(cal)
+    w._bd_save(w.bd_panel.get_calibration())
+    assert w.plot1d._kerr_cal.ok                        # θ display follows the calibration
+    w.set_setup("polar")
+    assert w.bd_panel.get_calibration() == [0.0] * 6    # the other setup has none saved
+    w.set_setup("longitudinal")
+    assert w.bd_panel.get_calibration() == cal
+    w.trajectory.set_workflow("time")
+    w.trajectory.set_params("time", {"duration": 0.04, "interval": 0.02, "acq_time": 0.01, "time_const": 0.1,
+                                     "volt": 0.0, "position_stage": False})
+    w.bottom_tabs.setCurrentWidget(w.trajectory)
+    w.start_run()
+    assert wait_until(qapp, lambda: w.engine is not None and w.engine.result is not None, 60)
+    assert w.engine.result["status"] == "completed"
+    assert list(read_file(w.engine.result["path"])["data"]["calibration"]["values"]) == cal
+    # Samba's prompt: a new sample offers a fresh calibration
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    w.trajectory.meta.meta_sample.setText("NewSample")
+    w.trajectory.meta.meta_sample.editingFinished.emit()
+    assert w.bd_panel.get_calibration() == [0.0] * 6 and w.bottom_tabs.currentWidget() is w.bd_panel
+    w.close()

@@ -35,6 +35,7 @@ from core.gui.bridge import EngineBridge, ServiceBridge, call_async, error_text
 from core.gui.login import LoginDialog
 from core.plot_config import X_NATURAL, X_TIME
 from core.plot_widgets import Live1DWidget, Live2DWidget
+from core.kerr import KerrDisplayState
 from core.polarity import flip_phase, phase_label
 from core.protocol import ErrorCode, ServiceError
 from core.scan import plans
@@ -43,6 +44,7 @@ from core.scan.engine import RunRequest, ScanEngine
 from core.scan.workflows import WORKFLOWS
 from core.theme import app_style
 from core.version import __version__, describe
+from Samba_mini.panels.bd_calibration import BDCalibrationPanel
 from Samba_mini.panels.calibration import CalibrationPanel
 from Samba_mini.panels.config_list import SETUPS, ConfigListPanel
 from Samba_mini.panels.profile import ProfilePanel
@@ -77,6 +79,7 @@ class MainWindow(QMainWindow):
         self._list = {"total": 1, "done": 0, "t0": None}     # scans in this run (scanlist: N)
         self._sl: dict | None = None                           # running scanlist
         self._sl_hall: list[float] = []                        # Hall readings of the current scan (mT)
+        self._last_sample = ""                                 # for Samba's "new sample?" prompt
         self._scan_t0: float | None = None
         self._map_data: dict[str, np.ndarray] = {}
         self._map_axes = None
@@ -164,8 +167,10 @@ class MainWindow(QMainWindow):
         self.browser = DataBrowserPanel(self._data_dir)
         self.profile = ProfilePanel(lambda: self.bridge)
         self.scanlist = ScanlistPanel()
+        self.bd_panel = BDCalibrationPanel(self._data_dir)
         self.bottom_tabs.addTab(self.trajectory, "Trajectory")
         self.bottom_tabs.addTab(self.scanlist, "Scanlist")
+        self.bottom_tabs.addTab(self.bd_panel, "BD Calibration")
         self.bottom_tabs.addTab(self.browser, "Data Browser")
         self.bottom_tabs.addTab(self.profile, "Profile")
         self.v_split.addWidget(self.bottom_tabs)
@@ -292,6 +297,16 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, s=s: self.set_setup(s))
         self.trajectory.workflow_changed.connect(self._on_workflow_changed)
         self.trajectory.changed.connect(self._show_estimate)
+        # Kerr rotation (θ) display: one shared on/off state for the 1D plot, the 2D map and the
+        # Data Browser (Samba); the λ/2 calibration of the BD tab converts volts to µrad.
+        self.kerr_state = KerrDisplayState()
+        for w in (self.plot1d, self.map2d, self.browser.plot):
+            w.set_kerr_state(self.kerr_state)
+        self.kerr_state.subscribe(self._on_kerr_toggled)
+        self.bd_panel.calibration_applied.connect(self._push_kerr_calibration)
+        self.bd_panel.save_requested.connect(self._bd_save)
+        self.bd_panel.load_requested.connect(lambda: self._bd_load(announce=True))
+        self.trajectory.meta.sample_edited.connect(self._on_sample_edited)
         self.trajectory.changed.connect(self._update_scanlist_info)
         self.scanlist.changed.connect(self._update_scanlist_info)
         self.config_list.config_selected.connect(lambda *_a: self._update_scanlist_info())
@@ -446,8 +461,11 @@ class MainWindow(QMainWindow):
         if self.prefs.get("default_sample"):
             meta["sample_id"] = self.prefs["default_sample"]
         self.trajectory.set_metadata(meta)
+        self._last_sample = self.trajectory.meta.meta_sample.text().strip()
         if self.prefs.get("setup") in SETUPS:
             self.set_setup(self.prefs["setup"])
+        self._bd_load()
+        self.kerr_state.set(bool(self.prefs.get("kerr_display", False)))
 
     def _login_logout(self) -> None:
         c = self._client()
@@ -549,6 +567,7 @@ class MainWindow(QMainWindow):
         self.trajectory.set_setup(setup)
         self.calibration.update_setup()
         self.calibration.refresh_positions()
+        self._bd_load()
 
     def _on_workflow_changed(self, key: str) -> None:
         self.right.configure_for(key)
@@ -587,6 +606,7 @@ class MainWindow(QMainWindow):
         if v.get("geometry") and "incidence" not in meta:      # configurations saved before the Samba layout
             meta["incidence"] = v["geometry"]
         self.trajectory.set_metadata(meta)
+        self._last_sample = self.trajectory.meta.meta_sample.text().strip()
         self._log("info", f"Loaded configuration '{name}'")
 
     def _save_config(self, setup: str, name: str) -> None:
@@ -700,7 +720,7 @@ class MainWindow(QMainWindow):
                          operator=meta["operator"], notes=meta["notes"],
                          config_name=self.config_list.current_name() or "", save_dir=data_dir,
                          export_csv=bool(self.prefs.get("export_csv", False)), lab_notebook=notebook,
-                         extra_metadata=em)
+                         extra_metadata=em, bd_calibration=self.bd_panel.get_calibration())
         self._prepare_plots(wf.key, params, n)
         self.engine = ScanEngine(self._client(), req, self.engine_bridge.callbacks())
         self._scan_t0 = time.time()
@@ -864,6 +884,60 @@ class MainWindow(QMainWindow):
         self._tint("IDLE")
         self._update_status_bar()
         self._show_estimate()
+
+    # ---------------------------------------------------------------- BD calibration / θ display
+    def _push_kerr_calibration(self, vals: list) -> None:
+        self.plot1d.set_kerr_calibration(vals)
+        self.map2d.set_kerr_calibration(vals)
+
+    def _on_kerr_toggled(self, enabled: bool) -> None:
+        c = self._client()
+        if c.session:
+            call_async(lambda: c.call("prefs.set", {"values": {"kerr_display": bool(enabled)}}),
+                       None, lambda e: None)
+
+    def _bd_save(self, vals: list) -> None:
+        c = self._client()
+        if not c.session:
+            self.show_login()
+            return
+        date = time.strftime("%Y-%m-%d %H:%M")
+        values = {f"bd_calibration_{self.setup}": [float(v) for v in vals],
+                  f"bd_calibration_date_{self.setup}": date}
+        try:
+            c.call("prefs.set", {"values": values})
+        except ServiceError as exc:
+            self.bd_panel.set_status(f"Not saved: {error_text(exc)}")
+            return
+        self.prefs.update(values)
+        self.bd_panel.set_status(f"Saved {date} for the {SETUP_LABEL[self.setup]} setup (your account).")
+
+    def _bd_load(self, announce: bool = False) -> None:
+        """The setup's saved calibration (zeros = none, so the previous setup's never leaks)."""
+        vals = self.prefs.get(f"bd_calibration_{self.setup}")
+        date = self.prefs.get(f"bd_calibration_date_{self.setup}", "")
+        if isinstance(vals, list) and len(vals) == 6:
+            self.bd_panel.load_calibration(vals)
+            self.bd_panel.set_status(f"Loaded the calibration saved {date} for the {SETUP_LABEL[self.setup]} setup.")
+        else:
+            self.bd_panel.load_calibration([0.0] * 6)
+            self.bd_panel.set_status(f"No BD calibration saved for the {SETUP_LABEL[self.setup]} setup yet.")
+            if announce:
+                QMessageBox.information(self, "No saved calibration",
+                                        "No calibration has been saved for this setup yet.")
+
+    def _on_sample_edited(self, name: str) -> None:
+        """Samba: a new sample asks whether to start a fresh λ/2 calibration."""
+        if not name or name == self._last_sample:
+            return
+        self._last_sample = name
+        ans = QMessageBox.question(self, "New sample", f"Sample changed to '{name}' — start a new BD "
+                                   "calibration?\n\nThe six values are cleared (zeros = no calibration in the "
+                                   "files) until you enter or fit new ones.")
+        if ans == QMessageBox.StandardButton.Yes:
+            self.bd_panel.load_calibration([0.0] * 6)
+            self.bd_panel.set_status(f"New sample '{name}': enter or fit the λ/2 calibration, then Save.")
+            self.bottom_tabs.setCurrentWidget(self.bd_panel)
 
     def _update_scanlist_info(self) -> None:
         wf = self.trajectory.workflow()

@@ -319,3 +319,26 @@ def test_minimoke_import_prefers_unmarked_dll(tmp_path, samba_home, monkeypatch)
     res = minimoke_import.read_minimoke(src)
     assert res["machine"]["hall"]["dll_path"] == str(good)
     assert any("marked as downloaded" in n for n in res["notes"])
+
+
+def test_bd_fit_reads_samba_mini_time_scans(tmp_path):
+    """Samba's λ/2 staircase fit accepts Samba_mini's dc_signal channel and file names."""
+    import h5py
+
+    from core import bd_fit
+    rng = np.random.default_rng(1)
+    levels = np.array([-5.0, -3.0, -1.0, 1.0, 3.0, 5.0]) * 1e-3            # V
+    dc = np.concatenate([lv + rng.normal(0, 2e-6, 60) for lv in levels])
+    t = np.arange(dc.size) * 0.1
+    day = tmp_path / "20261116"
+    day.mkdir()
+    path = day / "120000_TIME_S1_calibration_SIM.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("data/time", data=t)
+        f.create_dataset("data/dc_signal", data=dc)
+    assert bd_fit.is_time_calibration(str(path))
+    assert bd_fit.is_time_calibration(str(day / "120000_TIME_S1_calibration_2.h5"))
+    assert not bd_fit.is_time_calibration(str(day / "120000_SPATIAL_X_S1_calibration.h5"))
+    res = bd_fit.fit_file(str(path))
+    assert res.ok, res.reason
+    assert np.allclose(res.levels_mV, levels * 1e3, atol=0.05)
