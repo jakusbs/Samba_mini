@@ -75,6 +75,9 @@ def _fake_minimoke(root):
     return src
 
 
+_KEEP: list = []
+
+
 def _controls_without_service(monkeypatch):
     """Samba_controls window that sees no running service and records service starts."""
     import socket
@@ -88,6 +91,8 @@ def _controls_without_service(monkeypatch):
             ports.append(s.getsockname()[1])
     w = ControlsWindow(ServiceBridge("test", *ports), start_service=False)
     w._timer.stop()
+    w.panel._timer.stop()
+    _KEEP.append(w)      # deleting it mid-session lets queued Qt callbacks hit freed widgets
     monkeypatch.setattr(w.bridge, "probe", lambda *a, **k: None)
     started = []
     monkeypatch.setattr(w.proc, "start", lambda mode=None, extra_args=None: started.append(mode))
@@ -132,7 +137,6 @@ def test_controls_offers_minimoke_import_for_real_without_config(qapp, samba_hom
     assert started2 == [None]
     for win in (w, w2):
         win.bridge.close()
-        win.deleteLater()
 
 
 def test_samba_mini_xy_map_ui(qapp, service, tmp_path):
@@ -157,3 +161,64 @@ def test_samba_mini_xy_map_ui(qapp, service, tmp_path):
     import numpy as np
     assert np.isfinite(w._map_data["dc_signal"]).all()
     w.close()
+
+
+ROUND_TRIP = {"b_min": -0.3, "b_max": 0.45, "b_step": 0.015, "sweep_freq": 0.05, "num_sweeps": 3, "x": 12.5,
+              "y": -7.25, "position_stage": False, "volt": 0.75, "sensi": 2e-4, "lockin_freq": 2345.6,
+              "time_const": 0.2, "phase": 12.5, "acq_time": 0.3, "x_min": -20.0, "x_max": 30.0, "x_step": 2.5,
+              "y_min": 5.0, "y_max": 15.0, "y_step": 0.5, "b": 0.12, "repeat_num": 2, "field_settle_s": 0.4,
+              "settle_time": 0.15, "record_hall": False, "duration": 12.0, "interval": 0.25}
+
+
+def test_trajectory_layout_round_trips_every_minimoke_workflow(qapp):
+    """Samba's Spatial/Field layout must hand the engine exactly MiniMoke's parameters."""
+    from core.scan.workflows import WORKFLOWS
+    from Samba_mini.panels.trajectory import TrajectoryPanel
+
+    t = TrajectoryPanel()
+    for key, wf in WORKFLOWS.items():
+        values = wf.coerce({p.name: ROUND_TRIP[p.name] for p in wf.params})
+        assert values != wf.coerce(wf.defaults())
+        t.set_workflow(key)
+        t.set_params(key, values)
+        assert t.current == key
+        got = wf.coerce(t.params())
+        assert set(got) == set(values), key
+        for name, v in values.items():
+            assert got[name] == pytest.approx(v), (key, name, got[name], v)
+    # each measurement keeps its own lock-in / timing values (MiniMoke remembered them per procedure)
+    t.set_workflow("b_sweep_lockin")
+    t.set_params("b_sweep_lockin", {"time_const": 0.001})
+    t.set_workflow("time")
+    assert t.params()["time_const"] == pytest.approx(0.2)
+    t.set_workflow("b_sweep_lockin")
+    assert t.params()["time_const"] == pytest.approx(0.001)
+    # Samba's rule: the ticked axes choose the spatial measurement, none = time scan
+    t.set_workflow("time")
+    t.x_grp.scan_cb.setChecked(True)
+    assert t.current == "x_sweep"
+    t.y_grp.scan_cb.setChecked(True)
+    assert t.current == "xy_sweep"
+    t.x_grp.scan_cb.setChecked(False)
+    assert t.current == "y_sweep"
+    t.y_grp.scan_cb.setChecked(False)
+    assert t.current == "time"
+    t.type_btns[1].click()
+    assert t.current in ("b_sweep_lockin", "b_sweep_dc")
+    t.rb_dc.click()
+    assert t.current == "b_sweep_dc" and not t.li_box.isEnabled() and t.dc_box.isEnabled()
+    # polar setup measures PMOKE only
+    t.set_setup("polar")
+    assert t.metadata()["incidence"] == "PMOKE" and not t.meta.incidence_combo.isEnabled()
+
+
+def test_right_panel_rows_plot_only(qapp):
+    from Samba_mini.panels.right_panel import RightPanel
+
+    r = RightPanel()
+    r.configure_for("b_sweep_lockin")
+    axes = {m["name"]: m["axis"] for m in r.sensors_meta()}
+    assert axes["lockin_x"] == "Y1" and axes["dc_signal"] == "Y2" and axes["hall_field"] == "—"
+    r.configure_for("b_sweep_dc")                       # no lock-in channels without the lock-in
+    assert all(m["axis"] == "—" for m in r.sensors_meta() if m["name"].startswith("lockin"))
+    assert {row.channel() for row in r.rows} == {"dc_signal", "intensity", "hall_field"}

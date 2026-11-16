@@ -211,3 +211,21 @@ def test_lease_loss_interrupts_run(admin_client, service, tmp_path):
     f = read_file(eng.result["path"])
     assert f["attrs"]["scan_status"] == eng.result["status"]
     assert service.server.lease.status()["state"] == "FREE"
+
+
+def test_samba_metadata_fields_reach_the_file(admin_client, tmp_path):
+    """The Samba metadata box (incidence, polarization, λ/2 …) is stored under Samba's keys."""
+    params = dict(b=0.0, duration=0.06, interval=0.02, x=0.0, y=0.0, position_stage=False, record_hall=True,
+                  **dict(FAST_LOCKIN, volt=0.0))
+    extra = {"device_id": "D7", "incidence": "LMOKE+", "mirror_shift": 3.5, "polarization": "p", "lam2": True,
+             "lam4": False, "noDC": True, "r_4wire_ohm": 120.5, "fm_thickness_nm": 1.2, "t_stack_nm": 9.0,
+             "sample_id": "must-not-override"}
+    req = RunRequest("time", params, setup="longitudinal", geometry="LMOKE+", sample="S1", operator="op",
+                     save_dir=str(tmp_path / "data"), config_name="cfg", extra_metadata=extra)
+    res = ScanEngine(admin_client, req, Callbacks()).run()
+    assert res["status"] == "completed", res
+    meta = read_file(res["path"])["metadata"]
+    assert meta["device_id"] == "D7" and meta["incidence"] == "LMOKE+" and meta["polarization"] == "p"
+    assert bool(meta["lam2"]) and not bool(meta["lam4"]) and bool(meta["noDC"])
+    assert meta["mirror_shift"] == pytest.approx(3.5) and meta["r_4wire_ohm"] == pytest.approx(120.5)
+    assert meta["sample_id"] == "S1" and meta["geometry"] == "LMOKE+"     # engine keys win

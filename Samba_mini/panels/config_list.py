@@ -8,9 +8,8 @@ account database (presets), so they follow the login, not the PC.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QListWidget,
-                             QListWidgetItem, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout,
-                             QWidget)
+from PyQt6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QListWidget, QListWidgetItem,
+                             QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 SETUPS = ["longitudinal", "polar"]
 
@@ -32,9 +31,6 @@ class ConfigListPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(6)
-        title = QLabel("Configurations")
-        title.setStyleSheet("color:#89b4fa;font-weight:bold;")
-        lay.addWidget(title)
         row = QHBoxLayout()
         row.setSpacing(3)
 
@@ -64,10 +60,7 @@ class ConfigListPanel(QWidget):
             self.lists[s] = lw
             self.stack.addWidget(lw)
         lay.addWidget(self.stack, 1)
-        self.hint = QLabel("Log in to use your saved configurations.")
-        self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color:#6c7086;font-size:10px;")
-        lay.addWidget(self.hint)
+        self.setToolTip("Named configurations, saved to your account")
         self.setup = SETUPS[0]
 
     def set_setup(self, setup: str) -> None:

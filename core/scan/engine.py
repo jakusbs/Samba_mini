@@ -75,6 +75,9 @@ class RunRequest:
     save_dir: str = "."
     export_csv: bool = False
     lab_notebook: str | None = None       # path of the lab-notebook CSV (None = skip)
+    #: Samba's further metadata fields (device_id, incidence, mirror_shift, polarization, lam2, lam4,
+    #: noDC, r_4wire_ohm, r_2wire_ohm, fm_thickness_nm, t_stack_nm) -> /metadata, same keys as Samba
+    extra_metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -465,6 +468,8 @@ class ScanEngine:
             "service_instance": self.client.instance_id or "",
             "run_id": new_id(),
         }
+        for k, v in (self.req.extra_metadata or {}).items():
+            metadata.setdefault(str(k), v)            # never overrides the engine's own keys
         root = dict(root, scan_type=self.wf.scan_type, mode=self.mode)
         self._writer = ScanWriter(self.path, shape, specs, root, metadata)
         self._writer.create()
