@@ -65,6 +65,76 @@ def test_samba_mini_runs_measurement(qapp, service, tmp_path, monkeypatch):
     w.close()
 
 
+def _fake_minimoke(root):
+    src = root / "MiniMoke"
+    (src / "configs").mkdir(parents=True)
+    (src / "configs" / "instruments_config.local.ini").write_text(
+        "[LockIn]\nresource = TCPIP0::192.168.77.2::50000::SOCKET\n")
+    (src / "configs" / "procedures_config.ini").write_text(
+        "[B-Sweep]\nb_max = 0.7\nb_min = -0.7\nb_step = 0.005\nnum_sweeps = 2\nsweep_freq = 0.05\n")
+    return src
+
+
+def _controls_without_service(monkeypatch):
+    """Samba_controls window that sees no running service and records service starts."""
+    import socket
+
+    from core.gui.bridge import ServiceBridge
+    from Samba_controls.app import ControlsWindow
+    ports = []
+    for _ in range(2):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            ports.append(s.getsockname()[1])
+    w = ControlsWindow(ServiceBridge("test", *ports), start_service=False)
+    w._timer.stop()
+    monkeypatch.setattr(w.bridge, "probe", lambda *a, **k: None)
+    started = []
+    monkeypatch.setattr(w.proc, "start", lambda mode=None, extra_args=None: started.append(mode))
+    return w, started
+
+
+def test_controls_offers_minimoke_import_for_real_without_config(qapp, samba_home, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    from core.config import machine
+    from Samba_controls.panels import admin as admin_panel
+
+    src = _fake_minimoke(tmp_path)
+    before = {p: p.stat().st_mtime for p in src.rglob("*")}
+    answers = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: answers.pop(0))
+    monkeypatch.setattr(admin_panel, "choose_minimoke_folder", lambda parent: str(src))
+
+    w, started = _controls_without_service(monkeypatch)
+    w.mode_combo.setCurrentText("real")
+    # declined: nothing written, service not started
+    answers[:] = [QMessageBox.StandardButton.Cancel]
+    w.start_service()
+    assert started == [] and machine.load().status == "defaults"
+    # accepted (offer, then the summary): configuration written in real mode, service started
+    answers[:] = [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Yes]
+    w.start_service()
+    cfg = machine.load()
+    assert started == ["real"] and cfg.status == "loaded" and cfg.mode == "real"
+    assert cfg.data["lockin"]["resource"] == "TCPIP0::192.168.77.2::50000::SOCKET"
+    assert "b_sweep_dc" in w._pending_presets                    # saved after the first login
+    assert {p: p.stat().st_mtime for p in src.rglob("*")} == before     # MiniMoke untouched
+    # once a configuration exists there is no offer
+    answers[:] = []
+    w.start_service()
+    assert started == ["real", "real"]
+    # simulation / mode from configuration never ask
+    w2, started2 = _controls_without_service(monkeypatch)
+    from core import paths
+    paths.machine_config_path().unlink()
+    w2.start_service()
+    assert started2 == [None]
+    for win in (w, w2):
+        win.bridge.close()
+        win.deleteLater()
+
+
 def test_samba_mini_xy_map_ui(qapp, service, tmp_path):
     from core.gui.bridge import ServiceBridge
     from Samba_mini.app import MainWindow

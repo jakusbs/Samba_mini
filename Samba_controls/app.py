@@ -26,6 +26,7 @@ from core.gui.login import LoginDialog
 from core.protocol import ServiceError
 from core.theme import app_style
 from core.version import __version__
+from Samba_controls.panels import admin as admin_panel
 from Samba_controls.panels.admin import ConfigPanel, UsersPanel
 from Samba_controls.panels.devices import DevicePanel, DeviceTable
 from Samba_controls.process import ServiceProcess
@@ -40,6 +41,7 @@ class ControlsWindow(QMainWindow):
         self.bridge = bridge or ServiceBridge("Samba_controls")
         self.proc = ServiceProcess(self)
         self._we_started = False
+        self._pending_presets: dict | None = None   # MiniMoke presets imported before anyone logged in
         self.setWindowTitle(f"Samba_controls v{__version__} — device service · MiniMOKE · ETH Zürich")
         icon = REPO / "assets" / "samba_controls.ico"
         if icon.exists():
@@ -169,16 +171,59 @@ class ControlsWindow(QMainWindow):
             self._after_ready()
 
     def start_service(self) -> None:
-        if self.bridge.probe(1.0) is not None:
+        mode = None if self.mode_combo.currentIndex() == 0 else self.mode_combo.currentText()
+        info = self.bridge.probe(1.0)
+        if info is not None:
+            if mode and mode != info["mode"]:
+                self._msg("warning", f"The service is already running in {info['mode']} mode; "
+                                     f"stop it first to start it in {mode} mode.")
             self._after_ready()
             return
-        mode = None if self.mode_combo.currentIndex() == 0 else self.mode_combo.currentText()
         cfg = machine.load()
-        for p in cfg.problems:
-            self._msg("warning", f"configuration: {p}")
+        if cfg.status == "defaults":            # no machine.toml on this PC yet
+            if mode == "real":
+                if not self._offer_minimoke_import():
+                    self._msg("info", "Service not started: real hardware needs a machine configuration "
+                                      "(instrument addresses).")
+                    return
+                cfg = machine.load()
+            elif mode is None:
+                self._msg("info", "No machine configuration yet, so the service starts in SIMULATION. "
+                                  "To use the instruments, choose 'real' and press Start service: you will "
+                                  "be offered the import of MiniMoke's settings.")
+        if cfg.status != "defaults":
+            for p in cfg.problems:
+                self._msg("warning", f"configuration: {p}")
         self._set_badge("STARTING…", "sim_badge")
         self.proc.start(mode)
         self._we_started = True
+
+    def _offer_minimoke_import(self) -> bool:
+        """Real mode chosen but no machine.toml: offer to create it from MiniMoke's settings.
+
+        Like creating the first administrator, this bootstrap step needs no
+        login, and it is only offered while no configuration file exists; later
+        changes go through an administrator (Machine configuration tab)."""
+        box = QMessageBox(QMessageBox.Icon.Question, "No machine configuration",
+                          "There is no machine configuration on this PC yet, so the service does not know "
+                          "the instrument addresses (lock-in, Hall probe driver, stage serial numbers).\n\n"
+                          "Import them from MiniMoke? MiniMoke's files are only read. The new configuration "
+                          "is set to real hardware.",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, self)
+        box.button(QMessageBox.StandardButton.Yes).setText("Import from MiniMoke…")
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return False
+        src = admin_panel.choose_minimoke_folder(self)
+        if not src:
+            return False
+        res = admin_panel.confirm_and_apply(self, src, "real")
+        if res is None:
+            return False
+        self._pending_presets = res["presets"] or None
+        self._msg("info", f"Machine configuration created from {src}: {res['written'].get('config')}")
+        self.cfg.refresh()
+        return True
 
     def _after_ready(self) -> None:
         info = self.bridge.probe(2.0)
@@ -242,6 +287,13 @@ class ControlsWindow(QMainWindow):
             u = self.bridge.client.user
             self.user_lbl.setText(f"{u['username']} ({u['role']})")
             self.login_btn.setText("Log out")
+            if self._pending_presets:
+                presets, self._pending_presets = self._pending_presets, None
+                problems = admin_panel.save_minimoke_presets(self.bridge.client, presets)
+                for p in problems:
+                    self._msg("warning", p)
+                if not problems:
+                    self._msg("info", f"MiniMoke procedure settings saved as presets for {u['username']}.")
             self.users.refresh()
             self._poll()
 
