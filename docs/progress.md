@@ -115,12 +115,18 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   during a measurement`), as are refusals.  The calibration plot's time axis
   now follows the recorded data instead of spanning the planned duration
   (a 10 000-sample scan squeezed the first minutes into a sliver).
+* 2026-11-16 — Splash screen in Samba's style for both apps (dancer, title
+  with the icon's badge, author, ETH / Intermag Lab, status line and version),
+  shown from `python -m …` before the measurement modules load and kept up at
+  least 2 s; the window is built only afterwards, so its service check and
+  login dialog never open behind the splash.  Artwork built from Samba's
+  `samba_splash.svg` (`scripts\make_splash.py`); checked on this PC's screen.
 
 ## Tests
 
-`scripts\run_tests.bat` → **79 passed** (≈85 s) on the measurement PC,
+`scripts\run_tests.bat` → **81 passed** (≈95 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 16, engine 13, drivers
-14, core 16, recovery 4, process 2, GUI 14.  See the README table for what each
+14, core 16, recovery 4, process 2, GUI 16.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,

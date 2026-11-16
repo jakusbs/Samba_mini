@@ -26,6 +26,9 @@ derived from Samba's artwork with `scripts\make_icons.py`), plus a Start-menu
 `.install_config`; environment, configuration, accounts and data are kept).
 The shortcuts start `pythonw.exe -m Samba_mini` / `-m Samba_controls` directly
 (no console window); each app has its own taskbar identity and icon.
+While an app loads, a splash screen in Samba's style is shown (at least 2 s;
+artwork in `assets\*_splash.png`, built from Samba's `samba_splash.svg` with
+`scripts\make_splash.py`).  Set `SAMBA_MINI_NO_SPLASH=1` to start without it.
 
 ### Python environments on the MiniMOKE PC (inventory 2026-11-16)
 

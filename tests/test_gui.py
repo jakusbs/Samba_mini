@@ -523,3 +523,60 @@ def test_calibration_plot_time_axis_follows_the_data(qapp):
     p._redraw(force=True)
     assert 10.0 <= p.x_limits()[1] < 11.0
     p.close()
+
+
+def test_splash_shows_then_hands_over_to_the_window(qapp, monkeypatch):
+    """The start-up splash (Samba's look) is shown once, carries the version and status line,
+    stays up for the minimum time and closes when the main window is shown."""
+    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtWidgets import QMainWindow
+
+    from core.gui import splash
+    from core.version import __version__
+
+    for name in ("samba_mini", "samba_controls"):                     # 2x artwork for high-DPI screens
+        assert QPixmap(str(splash.ASSETS / f"{name}_splash.png")).size().width() == 2 * splash.SIZE[0]
+    monkeypatch.delenv("SAMBA_MINI_NO_SPLASH", raising=False)
+    monkeypatch.setattr(splash, "_current", None)
+    s = splash.start("samba_mini")
+    assert s is not None and s.isVisible() and s.message() == "Loading…"
+    assert splash.start("samba_mini") is s                            # main() reuses the one from __main__
+    assert s.version == __version__
+    size = s.pixmap().deviceIndependentSize()
+    assert (size.width(), size.height()) == splash.SIZE
+    splash.status("Opening the main window…")
+    assert s.message() == "Opening the main window…"
+    splash.wait(0.3)
+    assert time.monotonic() - s.shown_at >= 0.29
+    w = QMainWindow()
+    splash.finish(w)
+    assert w.isVisible() and splash._current is None
+    assert wait_until(qapp, lambda: not s.isVisible(), 10)
+    w.close()
+
+
+def test_splash_can_be_switched_off_and_survives_missing_artwork(qapp, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QMainWindow
+
+    from core.gui import splash
+
+    monkeypatch.setattr(splash, "_current", None)
+    monkeypatch.setenv("SAMBA_MINI_NO_SPLASH", "1")
+    assert splash.start("samba_mini") is None
+    t0 = time.monotonic()
+    splash.status("ignored")
+    splash.wait(5.0)                                                  # nothing to wait for
+    assert time.monotonic() - t0 < 1.0
+    w = QMainWindow()
+    splash.finish(w)
+    assert w.isVisible()
+    w.close()
+
+    monkeypatch.delenv("SAMBA_MINI_NO_SPLASH")
+    monkeypatch.setattr(splash, "ASSETS", tmp_path)                   # no PNG: plain card instead
+    s = splash.start("samba_controls")
+    assert s is not None and not s.pixmap().isNull()
+    w = QMainWindow()
+    splash.finish(w)
+    assert wait_until(qapp, lambda: not s.isVisible(), 10)
+    w.close()

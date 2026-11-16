@@ -1225,14 +1225,18 @@ def launch_controls() -> None:
 
 
 def main(argv=None) -> int:
-    from core.gui import install_crash_guard, set_windows_app_id
+    from core.gui import install_crash_guard, set_windows_app_id, splash
+    from Samba_mini import APP_ID
     install_crash_guard("samba_mini")          # log file + errors shown instead of closing the window
-    set_windows_app_id("ETH.Intermag.SambaMini")
-    app = QApplication(sys.argv if argv is None else argv)
+    set_windows_app_id(APP_ID)
+    app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Samba_mini")
     if (REPO / "assets" / "samba_mini.ico").exists():
         app.setWindowIcon(QIcon(str(REPO / "assets" / "samba_mini.ico")))
     app.setOrganizationName("ETH-Intermag")
+    splash.start("samba_mini", APP_ID)            # already up when started with python -m Samba_mini
+    splash.status("Opening the main window…")
+    splash.wait()
     w = MainWindow()
-    w.show()
+    splash.finish(w)
     return app.exec()
