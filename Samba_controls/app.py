@@ -41,7 +41,7 @@ class ControlsWindow(QMainWindow):
         self.proc = ServiceProcess(self)
         self._we_started = False
         self.setWindowTitle(f"Samba_controls v{__version__} — device service · MiniMOKE · ETH Zürich")
-        icon = REPO / "assets" / "samba_mini.ico"
+        icon = REPO / "assets" / "samba_controls.ico"
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
         self.setStyleSheet(app_style())
@@ -367,8 +367,12 @@ class ControlsWindow(QMainWindow):
 
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from core.gui import set_windows_app_id
+    set_windows_app_id("ETH.Intermag.SambaControls")
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Samba_controls")
+    if (REPO / "assets" / "samba_controls.ico").exists():
+        app.setWindowIcon(QIcon(str(REPO / "assets" / "samba_controls.ico")))
     app.setOrganizationName("ETH-Intermag")
     w = ControlsWindow()
     w.show()

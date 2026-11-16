@@ -852,8 +852,12 @@ def launch_controls() -> None:
 
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from core.gui import set_windows_app_id
+    set_windows_app_id("ETH.Intermag.SambaMini")
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Samba_mini")
+    if (REPO / "assets" / "samba_mini.ico").exists():
+        app.setWindowIcon(QIcon(str(REPO / "assets" / "samba_mini.ico")))
     app.setOrganizationName("ETH-Intermag")
     w = MainWindow()
     w.show()
