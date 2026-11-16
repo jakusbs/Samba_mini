@@ -54,7 +54,12 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
 
 3. Review `machine.toml` (see `config\examples\machine.example.toml`):
    coil limits, optional stage `limits_mm`, cleanup policy.
-4. Stop and start the service in Samba_controls.  Devices that cannot be
+4. Optional first check without touching outputs:
+   `scripts\service_console.bat --mode real --read-only` connects and reads only
+   (no control, no writes, no cleanup writes, no connect-time configuration
+   writes; the polar stage stays disconnected because its connect writes motor
+   currents).  Stop it with Ctrl+C.
+5. Stop and start the service in Samba_controls.  Devices that cannot be
    opened are shown as FAULT or DISABLED with the reason; the windows still
    open, but measurements that need them are refused.
 
