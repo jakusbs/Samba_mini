@@ -18,9 +18,9 @@ Samba_mini records **coil command in V** and shows a current only when
 | **Y-sweep** | as X with `y_min/y_max/y_step`, fixed `x` | same | same | same | same |
 | **XY map** | `x_*`, `y_*`, `b`, `repeat_num` (1–100), lock-in params, `settle_time` | same | same, stored as `[n_y, n_x]` per repeat | serpentine in y per column, fixed field, whole map repeated | — |
 | **Time trace** (`Time`) | `b`, `volt`, `sensi`, `lockin_freq`, `time_const`, `phase`, `acq_time`, `x`, `y`, `duration`, `interval` | same | elapsed s, absolute timestamp, coil V, Hall mT, X/Y/R/θ, DC, DC std, intensity, intensity std | n = max(1, int(duration/interval)); pacing by interval; pause gap visible in time axis | runs as a backend operation so pacing does not depend on GUI round trips |
-| Live readouts (Live tab) | intensity mV, balanced mV, field mT, Hall zero button | Samba_controls device panels + Samba_mini status | — | live DAQ/Hall polling only when idle; during a run the run's latest values are shown | monitor polling coordinated by the backend |
-| Manual stages (motor tabs) | odometer jog 10…0.00001 mm, go-to, set zero (home) | Samba_controls stage panel, Samba_mini "Instruments" tab | — | longitudinal/polar selection; software zero writes offsets | needs the lease; jogs rejected while moving |
-| Setup / geometry toggle | Longitudinal/Polar, PMOKE/LMOKE | setup pills, geometry pills | stored in metadata | polar ⇒ PMOKE | — |
+| Live readouts (Live tab) | intensity mV, balanced mV, field mT, Hall zero button | Samba_controls device panels + Samba_mini Hardware box (Trajectory tab) | — | live DAQ/Hall polling only when idle; during a run the run's latest values are shown | monitor polling coordinated by the backend |
+| Manual stages (motor tabs) | odometer jog 10…0.00001 mm, go-to, set zero (home) | Samba_controls stage panel, Samba_mini Calibration tab (stage positioning) | — | longitudinal/polar selection; software zero writes offsets | needs the lease; jogs rejected while moving |
+| Setup / geometry toggle | Longitudinal/Polar, PMOKE/LMOKE | setup pills; Samba's *Incidence* in the metadata box | stored in metadata | polar ⇒ PMOKE (incidence locked) | — |
 | Archive | local `<dir>/<date>/<setup>/<sample>_<proc>_<datetime>.csv`, server copies, lab-notebook CSV | `<data dir>/<YYYYMMDD>/<HHMMSS>_<TYPE>_<sample>_<config>.h5` (Samba), CSV export, lab notebook | — | lab-notebook columns | server copy is a later item (network share not testable here) |
 
 Validation rules kept: Hall minimum 2 ms per point

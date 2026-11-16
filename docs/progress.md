@@ -10,7 +10,7 @@ pushed to `jakusbs/Samba_mini`.  Not merged.
 | 1 Audit and design | done — `docs/architecture.md`, `docs/implementation-plan.md` |
 | 2 Service core (simulation) | done — protocol, device model, workers, auth, lease, operations, simulated instruments, client |
 | 3 Engine and storage | done — all six workflows, HDF5 (Samba layout), CSV export, lab notebook |
-| 4 Samba_mini UI | done — Samba layout/theme, live 1D/2D plots, data browser, configurations, instruments, profile |
+| 4 Samba_mini UI | done — Samba layout/theme down to the tabs (Spatial/Field trajectory, Timing/Metadata/Hardware, Calibration, Scanlist, BD Calibration), live 1D/2D plots, θ display, data browser, configurations, profile |
 | 5 Samba_controls UI | done — service lifecycle, device table/detail, manual commands, users, configuration import |
 | 6 Real drivers | written and tested against fake vendor libraries; **not run on the instruments** |
 | 7 Hardening and documentation | done — recovery tests, launchers, installation/troubleshooting |
@@ -36,15 +36,29 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   `service.log`.  On this PC `machine.toml` was created from
   `Documents\Minimoke-bugfixed` (mode real).
 
+* 2026-11-16 — Samba_mini arranged like Samba inside the tabs as well:
+  Spatial | Field trajectory (X/Y axis boxes with "Scan enabled", none
+  ticked = time scan; Lock-in and DC B-sweep side by side with the Hall
+  field monitor), Timing | Metadata | Hardware row (Samba's metadata fields;
+  7270 settings per measurement), Calibration plot tab with stage
+  positioning, Samba's sensor rows (checkbox plots only), action bar and
+  status bar.  Added Samba's Scanlist tab (N scans, field flip AB/ABBA,
+  Samba's `.txt`) and BD Calibration tab with the θ display
+  (`/data/calibration` in every new file).  MiniMoke workflows, engine and
+  file layout unchanged.
+
 ## Tests
 
-`scripts\run_tests.bat` → **62 passed** (≈60 s) on the measurement PC,
-simulation and fake drivers only.  Per area: service 15, engine 11, drivers
-12, core 15, recovery 4, process 2, GUI 3.  See the README table for what each
+`scripts\run_tests.bat` → **69 passed** (≈70 s) on the measurement PC,
+simulation and fake drivers only.  Per area: service 15, engine 13, drivers
+12, core 16, recovery 4, process 2, GUI 7.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
-Instruments, Data Browser, 2D map, device readbacks, manual controls); the
+Data Browser, 2D map, device readbacks, manual controls), and Samba_mini
+rendered next to the original Samba (run with its simulated devices in a
+throwaway home folder) for the Spatial, Field, time-scan, Calibration,
+Scanlist and BD Calibration views; the
 batch launcher and both module entry points started as real processes against
 an isolated temporary home and shut down cleanly; the MiniMoke importer read
 `Documents\Minimoke-bugfixed` correctly in a dry run (nothing written there).
@@ -142,8 +156,12 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
   `\\d.ethz.ch\...` archive) are not implemented; data stay local.
 * Application icons are derived from Samba's dancer artwork (same lab) with a
   badge per app (`scripts\make_icons.py`); replace `assets\*.ico` to rebrand.
-* The data browser's Kerr (λ/2) display needs a BD calibration, which
-  MiniMoke workflows do not produce; the pill stays disabled.
+* The θ (µrad) display needs a λ/2 calibration: enter or fit it in the BD
+  Calibration tab (Fit & Import expects a time scan from a configuration
+  named "calibration" while the plate is stepped through ticks 0–25).
+* Scanlist field flip reverses the coil command; the field_T column is the
+  scan's median Hall reading.  There is no relay on these setups
+  (relay_sign is always +1).
 * Machine configuration is edited as a file (Samba_controls shows it and
   imports MiniMoke settings, but has no form editor).
 
