@@ -76,11 +76,19 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   show unexpected errors in a message instead of closing.  The HDF5 files
   themselves were fine (all of today's files read back intact).
 
+* 2026-11-16 — Calibration tab measures only on Start (Samba's calibration
+  time scan: the tab's own samples / interval / Int, saved as
+  `..._calibration.h5` for the BD Fit & Import; no live monitoring).  The
+  *Repeats* field is gone: as in Samba, a measurement is repeated with the
+  Scanlist tab (one file per scan, Samba's scanlist `.txt`).  MiniMoke's
+  `repeat_num` is now always 1 — an X/Y-sweep still measures its line at +B
+  and at −B, an XY map once; configurations saved with more repeats run once.
+
 ## Tests
 
-`scripts\run_tests.bat` → **73 passed** (≈75 s) on the measurement PC,
+`scripts\run_tests.bat` → **74 passed** (≈75 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 15, engine 13, drivers
-12, core 16, recovery 4, process 2, GUI 11.  See the README table for what each
+12, core 16, recovery 4, process 2, GUI 12.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
