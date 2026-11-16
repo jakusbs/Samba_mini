@@ -43,6 +43,13 @@ PROTOCOL_PROBE_TIMEOUT_MS = 500
 PROTOCOL_FLUSH_MAX = 32
 PROTOCOL_PROBE_CHUNK_MAX = 4
 RECONNECT_SETTLE_S = 1.0
+# The Ethernet status chunk follows the reply within milliseconds on the lab
+# network.  Waiting the full read timeout (2 s) for one that never comes was
+# the "freeze" seen on 16 Nov: some points took +2.0 s, later almost all.
+DRAIN_TIMEOUT_MS = 100
+# A status chunk that turns up after the drain gave up is discarded before the
+# next command, so it can never be read as that command's reply.
+LATE_FLUSH_TIMEOUT_MS = 20
 USB_RESET_FROM_ATTEMPT = 3
 USB_RESET_SETTLE_S = 5.0
 
@@ -61,6 +68,8 @@ class Ametek7270(LockinBase):
         self._inst = None
         self._resource_in_use = None
         self._extra_chunks = 0
+        self._maybe_late = False          # a status chunk may still arrive: flush before the next command
+        self.missing_chunks = 0           # replies whose status chunk did not come (diagnostics)
 
     # ------------------------------------------------------------ session
     def _connect(self) -> None:
@@ -127,6 +136,7 @@ class Ametek7270(LockinBase):
             if chunks == 0:
                 raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "no answer to ID probe")
             self._extra_chunks = max(chunks - 1, 0)
+            self._maybe_late = False
             if flushed:
                 log.info("7270: flushed %d stale response(s)", flushed)
             if self._extra_chunks:
@@ -135,16 +145,49 @@ class Ametek7270(LockinBase):
             inst.timeout = old
 
     def _drain(self) -> None:
-        for _ in range(self._extra_chunks):
-            try:
-                self._inst.read()
-            except Exception:  # noqa: BLE001
-                break
+        """Read the interface's extra status chunk(s) after a reply, waiting briefly only."""
+        if not self._extra_chunks:
+            return
+        inst = self._inst
+        old = inst.timeout
+        inst.timeout = DRAIN_TIMEOUT_MS
+        try:
+            for _ in range(self._extra_chunks):
+                try:
+                    inst.read()
+                except Exception:  # noqa: BLE001 - missing chunk: do not wait for it
+                    self.missing_chunks += 1
+                    self._maybe_late = True
+                    n = self.missing_chunks
+                    if n in (1, 10, 100) or n % 1000 == 0:
+                        log.warning("7270: status chunk missing after a reply (%d so far); not waiting "
+                                    "for it", n)
+                    break
+        finally:
+            inst.timeout = old
+
+    def _flush_late(self) -> None:
+        """Discard a status chunk that arrived after _drain stopped waiting for it."""
+        if not self._maybe_late:
+            return
+        self._maybe_late = False
+        inst = self._inst
+        old = inst.timeout
+        inst.timeout = LATE_FLUSH_TIMEOUT_MS
+        try:
+            for _ in range(PROTOCOL_FLUSH_MAX):
+                try:
+                    inst.read()
+                except Exception:  # noqa: BLE001 - nothing pending
+                    break
+        finally:
+            inst.timeout = old
 
     # ------------------------------------------------------------ transactions
     def _ask_once(self, command: str) -> str:
         if self._inst is None:
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "7270 session closed")
+        self._flush_late()
         self._inst.write(command)
         result = self._inst.read().strip()
         self._drain()
@@ -178,6 +221,7 @@ class Ametek7270(LockinBase):
         """Write a set command and check the (empty) acknowledgement."""
         if self._inst is None:
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "7270 session closed")
+        self._flush_late()
         self._inst.write(command)
         response = self._inst.read()
         self._drain()
