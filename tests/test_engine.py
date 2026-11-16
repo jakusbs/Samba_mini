@@ -229,3 +229,20 @@ def test_samba_metadata_fields_reach_the_file(admin_client, tmp_path):
     assert bool(meta["lam2"]) and not bool(meta["lam4"]) and bool(meta["noDC"])
     assert meta["mirror_shift"] == pytest.approx(3.5) and meta["r_4wire_ohm"] == pytest.approx(120.5)
     assert meta["sample_id"] == "S1" and meta["geometry"] == "LMOKE+"     # engine keys win
+
+
+def test_bd_calibration_written_like_samba(admin_client, tmp_path):
+    """Six mV values -> /data/calibration (role calibration, mV); all zeros = not written."""
+    params = dict(b=0.0, duration=0.04, interval=0.02, x=0.0, y=0.0, position_stage=False, record_hall=False,
+                  **dict(FAST_LOCKIN, volt=0.0))
+    cal = [-5.1, -3.0, -1.0, 1.0, 3.0, 5.2]
+    for values, expect in ((cal, True), ([0.0] * 6, False), (None, False)):
+        req = RunRequest("time", params, sample="S1", save_dir=str(tmp_path / "data"), bd_calibration=values)
+        res = ScanEngine(admin_client, req, Callbacks()).run()
+        assert res["status"] == "completed", res
+        with h5py.File(res["path"], "r") as f:
+            assert ("calibration" in f["data"]) == expect
+            if expect:
+                assert np.allclose(f["data"]["calibration"][:], cal)
+                assert f["data"]["calibration"].attrs["unit"] == "mV"
+                assert f["data"]["calibration"].attrs["role"] == "calibration"

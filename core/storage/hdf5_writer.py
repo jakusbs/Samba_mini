@@ -119,6 +119,20 @@ class ScanWriter:
             self._close_quietly()
             raise StorageError(f"cannot initialise {self.path}: {exc}") from exc
 
+    def add_static(self, name: str, values, unit: str = "", role: str = "", label: str = "",
+                   group: str = "data") -> None:
+        """A dataset written once when the file is created (e.g. Samba's /data/calibration)."""
+        if self._f is None:
+            raise StorageError(f"{self.path} is not open")
+        try:
+            ds = self._f.require_group(group).create_dataset(name, data=np.asarray(values, dtype="f8"))
+            ds.attrs["role"] = role
+            ds.attrs["label"] = label
+            ds.attrs["unit"] = unit
+            self._f.flush()
+        except Exception as exc:
+            raise StorageError(f"cannot write {group}/{name} to {self.path}: {exc}") from exc
+
     # ------------------------------------------------------------ write
     def write(self, index: tuple, values: dict, group: str = "data", count_point: bool = True) -> None:
         """Write one point's values at *index* into datasets of *group*."""
