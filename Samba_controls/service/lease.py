@@ -15,7 +15,7 @@ States::
   cancelled and waited for, then the configured cleanup runs.  Only after the
   operations have stopped is the lease FREE again.  If an operation does not
   stop in time the lease stays RECONCILING (new owners are refused) until an
-  administrator forces it free after checking the setup.
+  administrator retries reconciliation successfully.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import time
 from typing import Callable
 
 from core.protocol import ErrorCode, ServiceError
+from Samba_controls.service.worker import CancelToken
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,8 @@ class LeaseManager:
         self.since: float | None = None
         self.expires: float | None = None       # monotonic
         self.last_reconcile: dict | None = None
+        self._cancel = CancelToken()
+        self._reconcile_running = False
         self._reconcile_thread: threading.Thread | None = None
 
     # -------------------------------------------------------------- query --
@@ -76,6 +79,12 @@ class LeaseManager:
             raise ServiceError(ErrorCode.LEASE_REQUIRED, "take control of the setup first",
                                self.status())
 
+    def request_token(self, token: str) -> CancelToken:
+        """Fence queued work when this acquisition of the lease ends."""
+        with self._lock:
+            self.require(token)
+            return self._cancel
+
     # ------------------------------------------------------------ changes --
     def acquire(self, token: str, session_public: dict) -> dict:
         with self._lock:
@@ -91,6 +100,7 @@ class LeaseManager:
                                    f"({self.holder['client']}) since "
                                    f"{time.strftime('%H:%M:%S', time.localtime(self.since))}",
                                    self.status())
+            self._cancel = CancelToken()
             self.state = self.HELD
             self.holder_token = token
             self.holder = dict(session_public)
@@ -122,12 +132,7 @@ class LeaseManager:
         if state == self.HELD:
             self._begin_reconcile(reason, wait=True)
         elif state == self.RECONCILING:
-            with self._lock:
-                self.last_reconcile = dict(self.last_reconcile or {}, forced=True,
-                                           note="lease forced free by an administrator; "
-                                                "hardware state not verified by software")
-                self._free()
-            self._notify(self.status())
+            self._begin_reconcile(reason, wait=True, retry=True)
         return self.status()
 
     def check_expiry(self) -> None:
@@ -141,10 +146,13 @@ class LeaseManager:
             self._begin_reconcile("heartbeat lost", wait=False)
 
     # ----------------------------------------------------------- internals --
-    def _begin_reconcile(self, reason: str, wait: bool) -> None:
+    def _begin_reconcile(self, reason: str, wait: bool, retry: bool = False) -> None:
         with self._lock:
-            if self.state != self.HELD:
+            if self._reconcile_running or (self.state != self.HELD and not (
+                    retry and self.state == self.RECONCILING)):
                 return
+            self._reconcile_running = True
+            self._cancel.cancel(f"lease ended: {reason}")
             self.state = self.RECONCILING
             holder = self.holder
         self._notify(self.status())
@@ -158,10 +166,11 @@ class LeaseManager:
             report = dict(report, reason=reason, previous_holder=holder, t=time.time())
             with self._lock:
                 self.last_reconcile = report
-                if report.get("stopped", True):
+                self._reconcile_running = False
+                if report.get("ok", False) and report.get("stopped", False):
                     self._free()
                 else:
-                    log.error("lease stays RECONCILING: operations did not stop (%s)", report)
+                    log.error("lease stays RECONCILING: stop/cleanup not verified (%s)", report)
             self._notify(self.status())
 
         if wait:

@@ -258,8 +258,9 @@ class ScanEngine:
             if not self.client.lease_holder:
                 self.client.acquire_lease()
             required = self.wf.required_devices(self.params, self.req.setup)
-            self._rpc(lambda: self.client.call("run.begin", {"required_devices": required,
+            run = self._rpc(lambda: self.client.call("run.begin", {"required_devices": required,
                                                              "workflow": self.wf.key}), "run.begin")
+            self.client = self.client.for_run(run["run_id"])
             began = True
             self._open_file(required)
             self._set_state(RUNNING, "")
@@ -325,7 +326,8 @@ class ScanEngine:
             msg = plans.b_sweep_dc_validation(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"])
         elif self.wf.key == "b_sweep_lockin":
             msg = plans.b_sweep_lockin_validation(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"],
-                                                  p["time_const"], p["acq_time"])
+                                                  (p["time_const"] if applied_time_constant_s is None
+                                          else applied_time_constant_s), p["acq_time"])
         if msg:
             raise ServiceError(ErrorCode.INVALID_VALUE, msg)
         if self.req.setup not in ("longitudinal", "polar"):
@@ -528,7 +530,7 @@ class ScanEngine:
             self._log("warning", f"lab notebook not updated (is it open in Excel?): {exc}")
 
     # ================================================================ shared steps
-    def _field_plan(self):
+    def _field_plan(self, applied_time_constant_s: float | None = None):
         p = self.params
         if self.wf.key == "b_sweep_dc":
             return plans.b_sweep_dc_plan(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"])
@@ -559,7 +561,7 @@ class ScanEngine:
         self._last_xy_um = (res["x_mm"] * UM_PER_MM, res["y_mm"] * UM_PER_MM)
         return self._last_xy_um
 
-    def _configure_lockin(self) -> None:
+    def _configure_lockin(self) -> dict:
         p = self.params
         applied = self._rpc(lambda: self._dev("lockin").command(
             "configure", volt=p["volt"], sensi=p["sensi"], freq=p["lockin_freq"], time_const=p["time_const"],
@@ -568,6 +570,7 @@ class ScanEngine:
             f"{k}={v:g}" for k, v in applied.items() if isinstance(v, (int, float))))
         if self._writer:
             self._writer.set_metadata(lockin_applied_json=applied)
+        return applied
 
     def _prepare_hall(self, integration_s: float) -> None:
         res = self._rpc(lambda: self._dev("moke").command("prepare", hall_integration_s=integration_s), "hall")
@@ -625,7 +628,7 @@ class ScanEngine:
                     if not self._pending_writes:
                         self._pause.clear()
                         self._set_state(RUNNING, "")
-                if op.done:
+                if op.done and res["last_seq"] >= res["total_records"]:
                     break
                 if (self._abort.is_set() or self._lease_lost.is_set()) and not abort_sent:
                     abort_sent = True
@@ -655,7 +658,8 @@ class ScanEngine:
     def _run_b_sweep(self) -> None:
         p = self.params
         lockin = self.wf.key == "b_sweep_lockin"
-        plan = self._field_plan()
+        applied = self._configure_lockin() if lockin else None
+        plan = self._field_plan(applied["time_constant_s"] if applied else None)
         n_sweeps = int(p["num_sweeps"])
         self._log("info", f"Points per sweep: {plan.n_total} ({len(plan.forward)} fwd + {len(plan.backward)} bwd)"
                           f" | T_point {plan.t_point_s * 1e3:.2f} ms | settle {plan.settle_s * 1e3:.2f} ms"
@@ -670,8 +674,6 @@ class ScanEngine:
         x_um, y_um = math.nan, math.nan
         if p.get("position_stage"):
             x_um, y_um = self._move_xy_um(p["x"], p["y"])
-        if lockin:
-            self._configure_lockin()
         self._writer.set_metadata(position_x_um=x_um, position_y_um=y_um)
 
         n = plan.n_total

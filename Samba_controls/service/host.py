@@ -24,7 +24,7 @@ from core.config.machine import MachineConfig
 from core.model import DevState, Reading
 from core.protocol import ErrorCode, ServiceError
 from Samba_controls.service.devices.base import CallContext, Device
-from Samba_controls.service.worker import CancelToken, DeviceWorker
+from Samba_controls.service.worker import CancelToken, DeviceWorker, NEVER_CANCELLED
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +84,9 @@ class DeviceHost:
         self._workers: dict[str, DeviceWorker] = {}
         self.enabled = enabled or {}
         self.publish = publish or (lambda topic, body: None)
+        self._call_context = threading.local()
+        self.run_id: str | None = None
+        self.run_cancel: CancelToken | None = None
         self.run_active = False
         self.run_info: dict | None = None
         self.run_devices: set[str] | None = None     # declared by the run; None = all locked
@@ -124,12 +127,24 @@ class DeviceHost:
     def run(self, name: str, fn: Callable[[Device], Any], timeout_s: float,
             cancel: CancelToken | None = None, label: str = "") -> Any:
         d = self.device(name)
+        if cancel is None or cancel is NEVER_CANCELLED:
+            cancel = getattr(self._call_context, "cancel", NEVER_CANCELLED)
+
+        def invoke():
+            previous = getattr(self._call_context, "cancel", NEVER_CANCELLED)
+            self._call_context.cancel = cancel
+            try:
+                cancel.raise_if_cancelled()
+                return fn(d)
+            finally:
+                self._call_context.cancel = previous
+
         if not d.PHYSICAL:
-            return fn(d)
-        return self._workers[name].call(lambda: fn(d), timeout_s, cancel, label)
+            return invoke()
+        return self._workers[name].call(invoke, timeout_s, cancel, label)
 
     # ------------------------------------------------------------ lifecycle
-    def connect(self, name: str, timeout_s: float = 60.0) -> dict:
+    def connect(self, name: str, timeout_s: float = 60.0, cancel: CancelToken | None = None) -> dict:
         d = self.device(name)
         if not self.enabled.get(name, True):
             raise ServiceError(ErrorCode.NOT_SUPPORTED, f"{name} is disabled in the machine configuration")
@@ -137,25 +152,26 @@ class DeviceHost:
             if hasattr(d, "refresh_state"):
                 d.refresh_state()
             return d.info()
-        self.run(name, lambda dev: dev.connect(), timeout_s, label="connect")
+        self.run(name, lambda dev: dev.connect(), timeout_s, cancel, label="connect")
         self._refresh_logical()
         return d.info()
 
-    def disconnect(self, name: str, timeout_s: float = 30.0) -> dict:
+    def disconnect(self, name: str, timeout_s: float = 30.0, cancel: CancelToken | None = None) -> dict:
         d = self.device(name)
         if d.PHYSICAL:
-            self.run(name, lambda dev: dev.disconnect(), timeout_s, label="disconnect")
+            self.run(name, lambda dev: dev.disconnect(), timeout_s, cancel, label="disconnect")
         self._refresh_logical()
         return d.info()
 
-    def reconnect(self, name: str) -> dict:
+    def reconnect(self, name: str, timeout_s: float = 60.0,
+                  cancel: CancelToken | None = None) -> dict:
         d = self.device(name)
         if d.PHYSICAL and d.state not in (DevState.OFF, DevState.DISABLED):
             try:
-                self.disconnect(name)
+                self.disconnect(name, timeout_s, cancel)
             except ServiceError as exc:
                 log.warning("disconnect before reconnect failed: %s", exc)
-        return self.connect(name)
+        return self.connect(name, timeout_s, cancel)
 
     def connect_all(self, timeout_s: float = 60.0) -> dict:
         """Connect every enabled physical device in parallel (each on its own worker)."""
@@ -217,16 +233,16 @@ class DeviceHost:
             out[attr] = reading.to_dict()
         return out
 
-    def write(self, name: str, attr: str, value: Any, timeout_s: float = 30.0) -> Any:
-        return self.run(name, lambda dev: dev.write_attribute(attr, value), timeout_s, label=f"write {attr}")
+    def write(self, name: str, attr: str, value: Any, timeout_s: float = 30.0,
+              cancel: CancelToken | None = None) -> Any:
+        return self.run(name, lambda dev: dev.write_attribute(attr, value), timeout_s, cancel,
+                        label=f"write {attr}")
 
     def command(self, name: str, command: str, args: dict, ctx: CallContext) -> Any:
         d = self.device(name)
         info, bound = d.bind_args(d.commands, command, args)
         if command == "stop" and hasattr(d, "request_stop"):
             d.request_stop()              # reaches a move already running on the worker
-        if not d.PHYSICAL:
-            return d.execute(command, bound, ctx)
         return self.run(name, lambda dev: dev.execute(command, bound, ctx), info.timeout_s, ctx.cancel,
                         label=command)
 

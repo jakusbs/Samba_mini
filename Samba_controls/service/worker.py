@@ -31,7 +31,9 @@ log = logging.getLogger(__name__)
 class CancelToken:
     """Thread-safe cancellation flag with a reason."""
 
-    def __init__(self):
+    def __init__(self, parent: "CancelToken | None" = None, deadline: float | None = None):
+        self.parent = parent
+        self.deadline = deadline
         self._event = threading.Event()
         self.reason = ""
 
@@ -42,15 +44,26 @@ class CancelToken:
 
     @property
     def cancelled(self) -> bool:
-        return self._event.is_set()
+        return (self._event.is_set() or (self.parent is not None and self.parent.cancelled)
+                or (self.deadline is not None and time.monotonic() >= self.deadline))
 
     def raise_if_cancelled(self) -> None:
+        if self.parent is not None:
+            self.parent.raise_if_cancelled()
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise ServiceError(ErrorCode.TIMEOUT, "request deadline expired")
         if self._event.is_set():
             raise ServiceError(ErrorCode.CANCELLED, self.reason or "cancelled")
 
     def wait(self, timeout: float) -> bool:
         """Sleep up to *timeout* s; return True if cancelled meanwhile."""
-        return self._event.wait(max(0.0, timeout))
+        end = time.monotonic() + max(0.0, timeout)
+        while not self.cancelled:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            self._event.wait(min(remaining, 0.02))
+        return self.cancelled
 
 
 NEVER_CANCELLED = CancelToken()
@@ -63,6 +76,11 @@ class _Job:
         self.fn = fn
         self.deadline = deadline
         self.cancel = cancel or NEVER_CANCELLED
+        token = self.cancel
+        while token is not None:
+            if token.deadline is not None:
+                self.deadline = min(self.deadline, token.deadline)
+            token = token.parent
         self.future: Future = Future()
         self.label = label
         self.abandoned = False
@@ -144,6 +162,7 @@ class DeviceWorker:
                 continue
             self.current_label, self.current_since = job.label, time.monotonic()
             try:
+                job.cancel.raise_if_cancelled()
                 result = job.fn()
             except BaseException as exc:  # noqa: BLE001 - forwarded to the caller
                 job.future.set_exception(exc)
