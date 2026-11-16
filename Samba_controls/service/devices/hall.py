@@ -137,16 +137,25 @@ class MagnetPhysikHall(HallBase):
         import MagnetPhysik as MP  # noqa: N814 - .NET namespace
         try:
             probe = MP.HallProbe()
-            probe.Speed = self.speed
+            if self.config.get("read_only"):
+                self.speed = int(probe.Speed)          # read, not written
+            else:
+                probe.Speed = self.speed
         except Exception as exc:
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, f"Hall probe not found: {exc}") from exc
         self._probe = probe
-        self.set_integration(self.integration_s)
+        if self.config.get("read_only"):
+            self.filter_points = int(probe.Filter)
+            self.integration_s = self.filter_points / self.rate if self.filter_points else 0.0
+        else:
+            self.set_integration(self.integration_s)
 
     def _disconnect(self) -> None:
         self._probe = None
 
     def hw_set_filter(self, points: int) -> None:
+        if self.config.get("read_only"):
+            raise ServiceError(ErrorCode.FORBIDDEN, "read-only mode: Hall filter not changed")
         self._probe.Filter = points
 
     def hw_read_tesla(self) -> float:

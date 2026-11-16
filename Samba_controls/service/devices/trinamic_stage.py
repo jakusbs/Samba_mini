@@ -68,6 +68,9 @@ class TrinamicStage(StageBase):
         self._iface = None
 
     def _connect(self) -> None:
+        if self.config.get("read_only"):
+            raise ServiceError(ErrorCode.NOT_SUPPORTED, "connecting writes motor currents and chopper "
+                               "parameters; not done in read-only mode")
         try:
             from pytrinamic.connections import ConnectionManager
         except ImportError as exc:

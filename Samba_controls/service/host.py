@@ -34,9 +34,10 @@ def build_devices(cfg: MachineConfig, state_dir) -> tuple[list[Device], dict]:
 
     data = cfg.data
     mode = data["backend"]["mode"]
+    ro = {"read_only": bool(data["backend"].get("read_only"))}
     offsets = OffsetStore(state_dir / "stage_offsets.json")
     coil = data["coil"]
-    daq_cfg = dict(data["daq"], coil_min_V=coil["min_V"], coil_max_V=coil["max_V"])
+    daq_cfg = dict(data["daq"], coil_min_V=coil["min_V"], coil_max_V=coil["max_V"], **ro)
     notes = {}
     devices: list[Device] = []
     if mode == "simulation":
@@ -53,14 +54,14 @@ def build_devices(cfg: MachineConfig, state_dir) -> tuple[list[Device], dict]:
         from Samba_controls.service.devices.kinesis_stage import KinesisStage
         from Samba_controls.service.devices.nidaq import NiDaq
         from Samba_controls.service.devices.trinamic_stage import TrinamicStage
-        devices += [NiDaq("daq", daq_cfg), Ametek7270("lockin", data["lockin"]),
-                    MagnetPhysikHall("hall", data["hall"])]
+        devices += [NiDaq("daq", daq_cfg), Ametek7270("lockin", dict(data["lockin"], **ro)),
+                    MagnetPhysikHall("hall", dict(data["hall"], **ro))]
         drivers = {"kinesis": KinesisStage, "trinamic": TrinamicStage}
         for key, st in data["stages"].items():
             cls = drivers.get(st.get("driver"))
             if cls is None:
                 raise ServiceError(ErrorCode.INVALID_VALUE, f"unknown stage driver {st.get('driver')!r}")
-            devices.append(cls(f"stage_{key}", dict(st, key=key), offsets=offsets))
+            devices.append(cls(f"stage_{key}", dict(st, key=key, **ro), offsets=offsets))
     cal = data.get("field_calibration", {})
     devices.append(Magnet("magnet", {"coil_min_V": coil["min_V"], "coil_max_V": coil["max_V"],
                                      "amps_per_volt": coil.get("amps_per_volt"),
