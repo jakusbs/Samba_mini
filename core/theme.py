@@ -137,6 +137,8 @@ QPushButton#setup_polar:checked{background:#ab4b52;color:#ffffff;}
 QTableWidget{background:#181825;gridline-color:#313244;border:1px solid #313244;}
 QHeaderView::section{background:#313244;color:#cdd6f4;border:none;padding:4px;}
 QStatusBar{background:#181825;border-top:1px solid #313244;}
+QAbstractSpinBox:disabled, QLineEdit:disabled, QComboBox:disabled{color:#585b70;}
+QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled{color:#585b70;}
 QStatusBar QLabel{color:#a6adc8;padding:0 6px;}
 """
 

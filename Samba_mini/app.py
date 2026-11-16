@@ -1,10 +1,12 @@
 """Samba_mini main window.
 
 Layout follows Samba's MainWindow (``Samba_main/samba.py``): no menu bar; an
-action bar with setup pills and Start/Pause/Abort; a horizontal splitter with
-the named-configuration list, the live tabs (2D Map, 1D Plot, Log) and the
-sensor/plot panel; bottom tabs (Trajectory, Instruments, Data Browser,
-Profile); and an eight-field status bar.
+action bar with setup pills, Start/Pause/Abort and the data folder; a
+horizontal splitter with the named-configuration list, the live tabs (2D Map,
+1D Plot, Calibration, Log) and the sensor/plot panel; bottom tabs (Trajectory,
+Data Browser, Profile); and Samba's run-progress status bar.  Samba_mini adds
+the control/mode/user section at the right of the action bar (shared-PC
+accounts and the setup lease).
 
 All hardware access goes through the device service (``core.client``); the
 scan itself runs in the Qt-free ``core.scan.engine.ScanEngine`` thread.
@@ -40,17 +42,21 @@ from core.scan.engine import RunRequest, ScanEngine
 from core.scan.workflows import WORKFLOWS
 from core.theme import app_style
 from core.version import __version__, describe
+from Samba_mini.panels.calibration import CalibrationPanel
 from Samba_mini.panels.config_list import SETUPS, ConfigListPanel
-from Samba_mini.panels.instruments import InstrumentsPanel
 from Samba_mini.panels.profile import ProfilePanel
 from Samba_mini.panels.right_panel import RightPanel
 from Samba_mini.panels.trajectory import TrajectoryPanel
-from Samba_mini.panels.widgets import pill
+
+
+RUN_META_KEYS = ("device_id", "incidence", "mirror_shift", "polarization", "lam2", "lam4", "noDC",
+                 "r_4wire_ohm", "r_2wire_ohm", "fm_thickness_nm", "t_stack_nm")
 
 log = logging.getLogger("Samba_mini")
 
 MEAN_KEYS = ["dc_signal", "intensity", "hall_field", "lockin_x", "lockin_r"]
 SETUP_LABEL = {"longitudinal": "Longitudinal", "polar": "Polar"}
+SETUP_COLOR = {"longitudinal": "#00a86b", "polar": "#ab4b52"}       # Samba's Green / IR colours
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -61,12 +67,13 @@ class MainWindow(QMainWindow):
         self.engine: ScanEngine | None = None
         self.engine_bridge = EngineBridge(self)
         self.setup = "longitudinal"
-        self.geometry_mode = "LMOKE"
         self.prefs: dict = {}
         self.configs: dict[str, dict[str, dict]] = {s: {} for s in SETUPS}
         self._run_t0: float | None = None
         self._run_state = "IDLE"
         self._progress = (0, 0)
+        self._list = {"total": 1, "done": 0, "t0": None}     # scans in this run (scanlist: N)
+        self._scan_t0: float | None = None
         self._map_data: dict[str, np.ndarray] = {}
         self._map_axes = None
         self._auto_login = auto_login
@@ -94,8 +101,8 @@ class MainWindow(QMainWindow):
     def _build(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setContentsMargins(6, 6, 6, 6)          # Samba: 6 px frame, 4 px spacing
+        root.setSpacing(4)
         root.addWidget(self._action_bar())
 
         self.v_split = QSplitter(Qt.Orientation.Vertical)
@@ -111,20 +118,32 @@ class MainWindow(QMainWindow):
         self.plot1d = Live1DWidget()
         self.live_tabs.addTab(self.map2d, "2D Map")
         self.live_tabs.addTab(self.plot1d, "1D Plot")
+        self.calibration = CalibrationPanel(lambda: self.bridge, lambda: self.setup)
+        self.live_tabs.addTab(self.calibration, "Calibration")
         log_w = QWidget()
         ll = QVBoxLayout(log_w)
-        ll.setContentsMargins(2, 2, 2, 2)
+        ll.setContentsMargins(2, 4, 2, 0)
+        hdr = QHBoxLayout()
+        hdr.setSpacing(6)
+        hdr.addWidget(QLabel("Filter:"))
         self.log_filter = QComboBox()
-        self.log_filter.addItems(["All", "Warnings and errors", "Errors"])
+        self.log_filter.addItems(["All", "Errors only", "Warnings + Errors"])
+        self.log_filter.setFixedWidth(160)
+        hdr.addWidget(self.log_filter)
+        hdr.addStretch()
+        clear = QLabel("<a style='color:#6c7086;font-size:10px;' href='#'>Clear</a>")
+        clear.linkActivated.connect(lambda _l: (self._log_entries.clear(), self.log_view.clear()))
+        hdr.addWidget(clear)
+        ll.addLayout(hdr)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        ll.addWidget(self.log_filter)
         ll.addWidget(self.log_view)
         self.live_tabs.addTab(log_w, "Log")
         self.live_tabs.setCurrentWidget(self.plot1d)
         cl.addWidget(self.live_tabs, 1)
-        self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("color:#a6adc8;padding:2px 6px;")
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setStyleSheet("color:#6c7086;font-size:11px;padding:2px 6px;")
         cl.addWidget(self.status_lbl)
         self.h_split.addWidget(center)
         self.right = RightPanel()
@@ -137,16 +156,14 @@ class MainWindow(QMainWindow):
         self.v_split.addWidget(self.h_split)
 
         self.bottom_tabs = QTabWidget()
-        self.trajectory = TrajectoryPanel()
-        self.instruments = InstrumentsPanel(lambda: self.bridge, lambda: self.setup)
+        self.trajectory = TrajectoryPanel(lambda: self.bridge)
         self.browser = DataBrowserPanel(self._data_dir)
         self.profile = ProfilePanel(lambda: self.bridge)
         self.bottom_tabs.addTab(self.trajectory, "Trajectory")
-        self.bottom_tabs.addTab(self.instruments, "Instruments")
         self.bottom_tabs.addTab(self.browser, "Data Browser")
         self.bottom_tabs.addTab(self.profile, "Profile")
         self.v_split.addWidget(self.bottom_tabs)
-        self.v_split.setSizes([520, 380])
+        self.v_split.setSizes([500, 400])
         root.addWidget(self.v_split, 1)
         self.setCentralWidget(central)
         self._status_bar()
@@ -154,30 +171,39 @@ class MainWindow(QMainWindow):
     def _action_bar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("action_bar")
+        bar.setStyleSheet("#action_bar{background:#12121f;border:1px solid #313244;border-radius:6px;}")
         bar.setFixedHeight(44)
         h = QHBoxLayout(bar)
         h.setContentsMargins(8, 4, 8, 4)
         h.setSpacing(6)
+        # Samba's setup selector: exclusive segmented pills, coloured when selected
         self.setup_group = QButtonGroup(self)
         self.setup_btns = {}
-        for s in SETUPS:
-            b = pill(SETUP_LABEL[s], f"setup_{s}")
+        seg = QHBoxLayout()
+        seg.setSpacing(0)
+        for idx, s in enumerate(SETUPS):
+            fg = SETUP_COLOR[s]
+            b = QPushButton(SETUP_LABEL[s])
+            b.setCheckable(True)
+            b.setFixedHeight(30)
+            b.setMinimumWidth(52)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            radius = ("border-top-left-radius:5px;border-bottom-left-radius:5px;"
+                      "border-top-right-radius:0;border-bottom-right-radius:0;" if idx == 0 else
+                      "border-top-left-radius:0;border-bottom-left-radius:0;"
+                      "border-top-right-radius:5px;border-bottom-right-radius:5px;")
+            b.setStyleSheet(
+                f"QPushButton{{background:#252538;border:1px solid #45475a;color:#6c7086;font-size:11px;"
+                f"font-weight:bold;padding:0 10px;{radius}}}"
+                f"QPushButton:hover{{background:#313244;color:#cdd6f4;}}"
+                f"QPushButton:checked{{background:{fg};color:#1e1e2e;border-color:{fg};}}")
             b.setToolTip("Longitudinal setup: Thorlabs stage (PMOKE or LMOKE)" if s == "longitudinal"
                          else "Polar setup: Trinamic stage (PMOKE)")
             self.setup_group.addButton(b)
             self.setup_btns[s] = b
-            h.addWidget(b)
+            seg.addWidget(b)
+        h.addLayout(seg)
         self.setup_btns["longitudinal"].setChecked(True)
-        self.geo_label = QLabel("Geometry:")
-        h.addWidget(self.geo_label)
-        self.geo_group = QButtonGroup(self)
-        self.geo_btns = {}
-        for g in ("PMOKE", "LMOKE"):
-            b = pill(g)
-            self.geo_group.addButton(b)
-            self.geo_btns[g] = b
-            h.addWidget(b)
-        self.geo_btns["LMOKE"].setChecked(True)
         h.addWidget(_vsep())
         st = self.style()
         self.start_btn = QPushButton(" Start")
@@ -195,7 +221,9 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.abort_btn.setEnabled(False)
         h.addWidget(_vsep())
-        h.addWidget(QLabel("Dir:"))
+        dir_lbl = QLabel("Dir:")
+        dir_lbl.setStyleSheet("color:#89b4fa;font-size:11px;font-weight:bold;")
+        h.addWidget(dir_lbl)
         self.dir_edit = QLineEdit(str(paths.default_measurement_dir()))
         self.dir_edit.setMinimumWidth(200)
         h.addWidget(self.dir_edit, 1)
@@ -218,11 +246,32 @@ class MainWindow(QMainWindow):
         return bar
 
     def _status_bar(self) -> None:
+        """Samba's run-progress bar: Scan / Start / Elapsed / Run left / Scan left / Dead / Done."""
         sb = QStatusBar()
         self.setStatusBar(sb)
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(8, 0, 8, 0)
+        row.setSpacing(0)
         self.sb = {}
-        for key in ("State", "Scan", "Start", "Elapsed", "Left", "Points", "Mode", "User"):
+        keys = ("Scan", "Start", "Elapsed", "Run left", "Scan left", "Dead", "Done")
+        for i, key in enumerate(keys):
+            cap = QLabel(f"{key}: ")
+            cap.setStyleSheet("color:#a6adc8;font-size:12px;")
+            val = QLabel("—")
+            val.setStyleSheet("color:#cdd6f4;font-size:12px;")
+            row.addWidget(cap)
+            row.addWidget(val)
+            self.sb[key] = val
+            if i < len(keys) - 1:
+                sep = QLabel("  │  ")
+                sep.setStyleSheet("color:#45475a;font-size:12px;")
+                row.addWidget(sep)
+        row.addStretch(1)
+        sb.addWidget(container, 1)
+        for key in ("Mode", "User"):
             lbl = QLabel(f"{key}: —")
+            lbl.setStyleSheet("color:#a6adc8;font-size:12px;padding:0 6px;")
             sb.addPermanentWidget(lbl)
             self.sb[key] = lbl
         self._tint("IDLE")
@@ -235,9 +284,8 @@ class MainWindow(QMainWindow):
         self.control_btn.clicked.connect(self._toggle_control)
         for s, b in self.setup_btns.items():
             b.clicked.connect(lambda _=False, s=s: self.set_setup(s))
-        for g, b in self.geo_btns.items():
-            b.clicked.connect(lambda _=False, g=g: setattr(self, "geometry_mode", g))
         self.trajectory.workflow_changed.connect(self._on_workflow_changed)
+        self.trajectory.changed.connect(self._show_estimate)
         self.right.plot_changed.connect(self._apply_plot_config)
         self.right.map_sensor_changed.connect(self._switch_map_sensor)
         self.right.colormap_changed.connect(self.map2d.set_colormap)
@@ -246,7 +294,8 @@ class MainWindow(QMainWindow):
         self.config_list.copy_requested.connect(self._copy_config)
         self.config_list.delete_requested.connect(self._delete_config)
         self.config_list.rename_requested.connect(self._rename_config)
-        self.instruments.message.connect(self._log)
+        self.calibration.message.connect(self._log)
+        self.trajectory.hardware.message.connect(self._log)
         self.profile.message.connect(self._log)
         self.profile.saved.connect(self._apply_prefs)
         self.log_filter.currentIndexChanged.connect(lambda _i: self._render_log())
@@ -263,6 +312,8 @@ class MainWindow(QMainWindow):
         sc.triggered.connect(self.start_run)
         self.addAction(sc)
         self._on_workflow_changed(self.trajectory.current)
+        self.trajectory.set_setup(self.setup)
+        self._show_estimate()
 
     # ================================================================ helpers
     def _data_dir(self) -> str:
@@ -277,7 +328,7 @@ class MainWindow(QMainWindow):
 
     def _log_visible(self, level: str) -> bool:
         f = self.log_filter.currentIndex()
-        return f == 0 or (f == 1 and level in ("warning", "error")) or (f == 2 and level == "error")
+        return f == 0 or (f == 1 and level == "error") or (f == 2 and level in ("warning", "error"))
 
     def _render_log(self) -> None:
         self.log_view.clear()
@@ -303,8 +354,7 @@ class MainWindow(QMainWindow):
         bg, border = {"RUNNING": ("#16241b", "#a6e3a1"), "PREPARING": ("#16241b", "#a6e3a1"),
                       "PAUSED": ("#2b2015", "#fab387"), "STOPPING": ("#2b2015", "#fab387")}.get(
             state, ("#181825", "#313244"))
-        self.statusBar().setStyleSheet(f"QStatusBar{{background:{bg};border-top:1px solid {border};}}"
-                                       "QStatusBar QLabel{color:#cdd6f4;padding:0 6px;}")
+        self.statusBar().setStyleSheet(f"QStatusBar{{background:{bg};border-top:2px solid {border};}}")
 
     @property
     def running(self) -> bool:
@@ -373,7 +423,7 @@ class MainWindow(QMainWindow):
         self._apply_prefs(self.prefs)
         self._reload_configs()
         self._log("info", f"Logged in as {user.get('username')}")
-        self.instruments.refresh_positions()
+        self.calibration.refresh_positions()
         self._update_control_btn()
 
     def _apply_prefs(self, prefs: dict) -> None:
@@ -384,8 +434,7 @@ class MainWindow(QMainWindow):
         if self.prefs.get("default_operator"):
             meta["operator"] = self.prefs["default_operator"]
         if self.prefs.get("default_sample"):
-            meta["sample"] = self.prefs["default_sample"]
-        meta["export_csv"] = bool(self.prefs.get("export_csv", False))
+            meta["sample_id"] = self.prefs["default_sample"]
         self.trajectory.set_metadata(meta)
         if self.prefs.get("setup") in SETUPS:
             self.set_setup(self.prefs["setup"])
@@ -431,14 +480,17 @@ class MainWindow(QMainWindow):
 
     def _on_event(self, topic: str, body: dict) -> None:
         if topic.startswith("readback."):
-            dev, attr = body.get("device"), body.get("attr")
-            self.right.set_readout(dev, attr, body.get("value"), body.get("unit", ""), body.get("quality", ""))
+            dev, attr, q = body.get("device"), body.get("attr"), body.get("quality", "")
+            hw = self.trajectory.hardware
+            hw.set_readout(dev, attr, body.get("value"), q)
+            if dev == "hall" and attr == "field_mT":
+                self.trajectory.add_field_reading(body.get("value"))
             if dev == f"stage_{self.setup}" and attr in ("x_mm", "y_mm", "z_mm"):
-                self.instruments.set_position(attr[0], body.get("value"), body.get("quality", ""))
+                self.calibration.set_position(attr[0], body.get("value"), q)
             if dev == "lockin" and attr == "xy" and isinstance(body.get("value"), dict):
                 v = body["value"]
-                self.right.set_readout("lockin", "x_V", v.get("x_V"), "V", body.get("quality", ""))
-                self.right.set_readout("lockin", "r_V", v.get("r_V"), "V", body.get("quality", ""))
+                hw.set_readout("lockin", "x_V", v.get("x_V"), q)
+                hw.set_readout("lockin", "r_V", v.get("r_V"), q)
         elif topic == "lease":
             self._update_control_btn(body)
         elif topic.startswith("state."):
@@ -483,12 +535,10 @@ class MainWindow(QMainWindow):
             return
         self.setup = setup
         self.setup_btns[setup].setChecked(True)
-        polar = setup == "polar"
-        for w in (self.geo_label, *self.geo_btns.values()):
-            w.setVisible(not polar)
         self.config_list.set_setup(setup)
-        self.instruments.update_setup()
-        self.instruments.refresh_positions()
+        self.trajectory.set_setup(setup)
+        self.calibration.update_setup()
+        self.calibration.refresh_positions()
 
     def _on_workflow_changed(self, key: str) -> None:
         self.right.configure_for(key)
@@ -496,8 +546,9 @@ class MainWindow(QMainWindow):
 
     # ================================================================ named configurations
     def _config_value(self) -> dict:
-        return {"workflow": self.trajectory.current, "params": self.trajectory.params(),
-                "geometry": self.geometry_mode, "metadata": self.trajectory.metadata()}
+        meta = self.trajectory.metadata()
+        meta.pop("sample", None)
+        return {"workflow": self.trajectory.current, "params": self.trajectory.params(), "metadata": meta}
 
     def _reload_configs(self) -> None:
         self.configs = {s: {} for s in SETUPS}
@@ -512,7 +563,6 @@ class MainWindow(QMainWindow):
             self._log("warning", f"configurations not loaded: {error_text(exc)}")
         for s in SETUPS:
             self.config_list.set_items(s, sorted(self.configs[s]))
-        self.config_list.hint.setText("Configurations are saved to your account.")
 
     def _load_config(self, setup: str, name: str) -> None:
         if self.running:
@@ -522,11 +572,10 @@ class MainWindow(QMainWindow):
             return
         self.trajectory.set_workflow(v.get("workflow", self.trajectory.current))
         self.trajectory.set_params(v.get("workflow"), v.get("params", {}))
-        if v.get("geometry") in self.geo_btns:
-            self.geometry_mode = v["geometry"]
-            self.geo_btns[v["geometry"]].setChecked(True)
         meta = dict(v.get("metadata", {}))
         meta.pop("export_csv", None)
+        if v.get("geometry") and "incidence" not in meta:      # configurations saved before the Samba layout
+            meta["incidence"] = v["geometry"]
         self.trajectory.set_metadata(meta)
         self._log("info", f"Loaded configuration '{name}'")
 
@@ -609,13 +658,16 @@ class MainWindow(QMainWindow):
         meta = self.trajectory.metadata()
         data_dir = self._data_dir()
         notebook = self.prefs.get("lab_notebook") or os.path.join(data_dir, "lab_notebook_SambaMini.csv")
-        req = RunRequest(wf.key, params, setup=self.setup, geometry=self.geometry_mode, sample=meta["sample"],
+        req = RunRequest(wf.key, params, setup=self.setup, geometry=meta["incidence"], sample=meta["sample"],
                          operator=meta["operator"], notes=meta["notes"],
                          config_name=self.config_list.current_name() or "", save_dir=data_dir,
-                         export_csv=meta["export_csv"], lab_notebook=notebook)
+                         export_csv=bool(self.prefs.get("export_csv", False)), lab_notebook=notebook,
+                         extra_metadata={k: meta[k] for k in RUN_META_KEYS if k in meta})
         self._prepare_plots(wf.key, params, n)
         self.engine = ScanEngine(c, req, self.engine_bridge.callbacks())
         self._run_t0 = time.time()
+        self._scan_t0 = self._run_t0
+        self._list = {"total": 1, "done": 0}
         self._progress = (0, n)
         self._set_running_ui(True)
         self.engine.start()
@@ -640,10 +692,10 @@ class MainWindow(QMainWindow):
         self.abort_btn.setEnabled(running)
         self.trajectory.set_editable(not running)
         self.config_list.setEnabled(not running)
-        for b in list(self.setup_btns.values()) + list(self.geo_btns.values()):
+        for b in self.setup_btns.values():
             b.setEnabled(not running)
         self.login_btn.setEnabled(not running)
-        self.instruments.setEnabled(not running)
+        self.calibration.setEnabled(not running)
         if not running:
             self.pause_btn.setText(" Pause")
 
@@ -774,25 +826,42 @@ class MainWindow(QMainWindow):
 
     # ================================================================ status bar
     def _update_status_bar(self) -> None:
+        """Samba's seven fields; 'Dead' is the share of time not spent integrating."""
         c = self._client()
-        st = self._run_state if self.engine else "IDLE"
-        self.sb["State"].setText(f"State: {st}")
-        self.sb["Scan"].setText(f"Scan: {WORKFLOWS[self.trajectory.current].short}")
-        if self._run_t0 and self.engine:
-            self.sb["Start"].setText("Start: " + time.strftime("%H:%M:%S", time.localtime(self._run_t0)))
-            el = time.time() - self._run_t0 if self.running else (self.engine.result or {}).get("elapsed", 0)
-            if self.running:
-                self.sb["Elapsed"].setText(f"Elapsed: {_hms(el)}")
-                done, total = self._progress
-                if done > 0 and total > done:
-                    self.sb["Left"].setText(f"Left: ~{_hms(el / done * (total - done))}")
-            else:
-                self.sb["Left"].setText("Left: —")
-        done, total = self._progress
-        self.sb["Points"].setText(f"Points: {done}/{total}")
         mode = (self.bridge.hello_info or {}).get("mode", "offline") if c.connected else "offline"
         self.sb["Mode"].setText(f"Mode: {mode}")
         self.sb["User"].setText(f"User: {(c.user or {}).get('username', '—')}")
+        if not (self.running and self._run_t0):
+            for key in ("Scan", "Start", "Elapsed", "Run left", "Scan left", "Dead", "Done"):
+                self.sb[key].setText("—")
+            return
+        now = time.time()
+        lst = self._list
+        done, total = self._progress
+        frac_scan = done / total if total else 0.0
+        frac_run = (lst["done"] + frac_scan) / max(lst["total"], 1)
+        run_el = now - self._run_t0
+        scan_el = now - (self._scan_t0 or self._run_t0)
+        self.sb["Scan"].setText(f"{lst['done'] + 1}/{lst['total']}")
+        self.sb["Start"].setText(time.strftime("%H:%M:%S", time.localtime(self._run_t0)))
+        self.sb["Elapsed"].setText(_hms(run_el))
+        self.sb["Run left"].setText(_hms(run_el * (1 - frac_run) / frac_run) if frac_run > 0 else "—")
+        self.sb["Scan left"].setText(_hms(scan_el / done * (total - done)) if done > 0 else "—")
+        acq = (self.engine.params or {}).get("acq_time") if self.engine else None
+        if acq and done and scan_el > 0:
+            self.sb["Dead"].setText(f"{max(0.0, (scan_el - done * acq) / scan_el) * 100:.0f}%")
+        else:
+            self.sb["Dead"].setText("—")
+        self.sb["Done"].setText(f"{frac_run * 100:.0f}%")
+
+    def _show_estimate(self) -> None:
+        """Samba shows the pre-scan estimate in the status line under the plot."""
+        if self.running:
+            return
+        text = self.trajectory.summary_text()
+        bad = ":" in text and "points" not in text
+        self.status_lbl.setText(text)
+        self.status_lbl.setStyleSheet(f"color:{'#f38ba8' if bad else '#6c7086'};font-size:11px;padding:2px 6px;")
 
     # ================================================================ window
     def _restore_geometry(self) -> None:
