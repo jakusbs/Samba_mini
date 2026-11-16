@@ -63,6 +63,9 @@ def main(argv=None) -> int:
     ap.add_argument("--rpc-port", type=int)
     ap.add_argument("--event-port", type=int)
     ap.add_argument("--no-connect", action="store_true", help="do not connect devices at start")
+    ap.add_argument("--read-only", action="store_true",
+                    help="diagnostics: connect and read only; no control, no writes, no cleanup writes, "
+                         "no connect-time configuration writes (devices that need them stay disconnected)")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
@@ -85,6 +88,9 @@ def main(argv=None) -> int:
         log.warning("configuration: %s", p)
     if args.mode:
         cfg.data["backend"]["mode"] = args.mode   # devices stay disabled if the file was invalid
+    if args.read_only:
+        cfg.data["backend"]["read_only"] = True
+        log.warning("READ-ONLY diagnostics mode: control, writes and cleanup writes are disabled")
 
     from Samba_controls.service.server import ServiceServer
     import zmq
@@ -107,7 +113,8 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGTERM, _sig)
 
     server.start_background()
-    print(f"READY rpc={server.rpc_port} events={server.event_port} mode={cfg.mode} pid={os.getpid()}",
+    print(f"READY rpc={server.rpc_port} events={server.event_port} mode={cfg.mode} pid={os.getpid()}"
+          + (" read-only" if server.read_only else ""),
           flush=True)
     server.serve_forever()
     return 0

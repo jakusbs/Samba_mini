@@ -194,3 +194,29 @@ def test_stage_move_and_stop(admin_client):
     assert abs(res["position_mm"] - 0.05) < 1e-6
     res = st.command("jog", axis="x", delta_mm=0.01)
     assert abs(res["position_mm"] - 0.06) < 1e-6
+
+
+def test_read_only_mode_refuses_control_and_writes(samba_home):
+    from tests.conftest import start_service
+    rs = start_service(samba_home, {"backend": {"read_only": True}})
+    calls = []
+    rs.server.host.cleanup_all = lambda *a, **k: calls.append(a) or []
+    try:
+        c = rs.client()
+        assert c.hello()["read_only"] is True
+        c.bootstrap(*ADMIN)
+        c.login(*ADMIN)
+        for fn in (lambda: c.acquire_lease(),
+                   lambda: c.device("daq").command("set_outputs", coil_V=0.0),
+                   lambda: c.device("lockin").command("output_off"),
+                   lambda: c.device("stage_longitudinal").command("stop"),
+                   lambda: c.device("daq").write("coil_command_V", 0.0),
+                   lambda: c.call("run.begin", {})):
+            with pytest.raises(ServiceError) as e:
+                fn()
+            assert e.value.code == ErrorCode.FORBIDDEN
+        assert math.isfinite(c.device("hall").read_value("field_mT"))
+        assert "x_V" in c.device("lockin").command("read_xyrt")      # non-mutating query allowed
+    finally:
+        rs.stop()
+    assert calls == []                                               # no cleanup writes at shutdown

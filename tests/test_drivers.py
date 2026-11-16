@@ -429,3 +429,48 @@ def test_hall_missing_dll_disabled():
     with pytest.raises(ServiceError):
         h.connect()
     assert h.state.value == "DISABLED"
+
+
+def test_read_only_connect_writes_nothing(fake_pylablib, fake_trinamic, tmp_path, monkeypatch):
+    from Samba_controls.service.devices.kinesis_stage import KinesisStage
+    from Samba_controls.service.devices.trinamic_stage import TrinamicStage
+    st = KinesisStage("s", {"serial_x": "1", "serial_y": "2", "serial_z": "3", "read_only": True})
+    st.connect()
+    assert not any(c[0] == "backlash" for c in fake_pylablib["1"].calls)
+    assert isinstance(st.get_mm("x"), float)
+    tr = TrinamicStage("p", {"read_only": True})
+    with pytest.raises(ServiceError):
+        tr.connect()
+    assert fake_trinamic.sent == []                                 # no SAP written
+    dll = tmp_path / "MagnetPhysik.Usb.dll"
+    dll.write_bytes(b"fake")
+
+    class Probe:
+        def __init__(self):
+            self.writes = []
+            self._speed, self._filter = 1, 128
+
+        def __setattr__(self, k, v):
+            if k in ("Speed", "Filter", "Zero"):
+                self.writes.append(k)
+            object.__setattr__(self, k, v)
+
+        Speed = property(lambda s: s._speed, lambda s, v: object.__setattr__(s, "_speed", v))
+        Filter = property(lambda s: s._filter, lambda s, v: object.__setattr__(s, "_filter", v))
+
+        def get_Tesla(self):
+            return 0.001
+    probe = Probe()
+    mp = types.ModuleType("MagnetPhysik")
+    mp.HallProbe = lambda: probe
+    clr = types.ModuleType("clr")
+    clr.AddReference = lambda p: None
+    monkeypatch.setitem(sys.modules, "clr", clr)
+    monkeypatch.setitem(sys.modules, "MagnetPhysik", mp)
+    from Samba_controls.service.devices.hall import MagnetPhysikHall
+    h = MagnetPhysikHall("hall", {"dll_path": str(dll), "read_only": True})
+    h.connect()
+    assert probe.writes == []                                       # Speed/Filter only read
+    assert h.integration_s == pytest.approx(128 / 470)
+    with pytest.raises(ServiceError):
+        h.set_integration(0.1)

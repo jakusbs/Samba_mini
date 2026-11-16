@@ -48,6 +48,10 @@ class KinesisStage(StageBase):
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE,
                                f"Kinesis motor not found ({exc}); is the Kinesis GUI closed?") from exc
         self._motors = motors
+        if self.config.get("read_only"):
+            log.info("read-only: controller backlash setting left unchanged")
+            self.load_offsets()
+            return
         steps = int(round(self.backlash_mm * self.mm2steps))
         for a, m in motors.items():
             try:

@@ -43,6 +43,7 @@ class ServiceServer:
                  rpc_port: int | None = None, event_port: int | None = None):
         self.cfg = cfg
         self.backend_cfg = cfg.data["backend"]
+        self.read_only = bool(self.backend_cfg.get("read_only"))
         self.rpc_port = int(rpc_port or self.backend_cfg["rpc_port"])
         self.event_port = int(event_port or self.backend_cfg["event_port"])
         self.instance_id = protocol.new_id()
@@ -198,7 +199,11 @@ class ServiceServer:
         log.info("service stopping (%s)", self._shutdown_reason or "stop requested")
         if self.ops.active() is not None:
             self.ops.abort_all("service shutting down", float(self.backend_cfg["reconcile_wait_s"]))
-        problems = self.host.cleanup_all(self.cfg.data.get("cleanup"))
+        if self.read_only:
+            log.info("read-only mode: shutdown cleanup skipped (nothing was written)")
+            problems = []
+        else:
+            problems = self.host.cleanup_all(self.cfg.data.get("cleanup"))
         if problems:
             log.error("cleanup problems at shutdown: %s", problems)
         self.host.shutdown()
@@ -245,6 +250,9 @@ class ServiceServer:
         if entry is None:
             raise ServiceError(ErrorCode.UNKNOWN_METHOD, f"unknown method {method!r}")
         level, fn = entry
+        if self.read_only and (level == "lease" or method in _RO_FORBIDDEN):
+            raise ServiceError(ErrorCode.FORBIDDEN, "the service runs in read-only diagnostics mode: "
+                               "control and writes are disabled")
         session = None
         if level != "public":
             session = self.sessions.get(req["session"])
@@ -309,6 +317,7 @@ class ServiceServer:
             "instance_id": self.instance_id,
             "pid": os.getpid(),
             "mode": self.cfg.mode,
+            "read_only": self.read_only,
             "config_status": self.cfg.status,
             "config_problems": self.cfg.problems,
             "started": self.started,
@@ -417,6 +426,9 @@ class ServiceServer:
         if info is None:
             raise ServiceError(ErrorCode.UNKNOWN_COMMAND, f"{dev.name} has no command {name!r}")
         if info.mutating:
+            if self.read_only:
+                raise ServiceError(ErrorCode.FORBIDDEN, "read-only diagnostics mode: commands that change "
+                                   "the instruments are disabled")
             self.lease.require(s.token)
             if dev.name != "moke":
                 self._refuse_during_run(dev.name, allow_stop=(name == "stop"))
@@ -491,6 +503,10 @@ class ServiceServer:
     def _config_get(self, s, p, r) -> dict:
         return {"path": str(self.cfg.path), "status": self.cfg.status, "problems": self.cfg.problems,
                 "data": self.cfg.snapshot(), "mode": self.cfg.mode}
+
+
+#: auth-level methods that change state and are refused in read-only mode
+_RO_FORBIDDEN = {"lease.acquire", "lease.force_release"}
 
 
 def _str(params: dict, key: str) -> str:
