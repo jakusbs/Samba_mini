@@ -281,10 +281,11 @@ class ScanEngine:
             except Exception as exc:  # noqa: BLE001
                 self._log("warning", f"could not return to the start position: {exc}")
             try:
-                res = self.client.call("run.end", {"cleanup": True}, 120.0)
+                self.client.hello(3.0)
+                res = self.client.call("run.end", {"cleanup": True}, 60.0)
                 cleanup_problems = res.get("cleanup_problems", [])
             except ServiceError as exc:
-                cleanup_problems = [f"run.end failed: {exc.message}"]
+                cleanup_problems = [f"cleanup not confirmed: {exc.message}"]
         elif status == "interrupted":
             cleanup_problems = ["cleanup not confirmed: the service performs it when the lease expires"]
         for p in cleanup_problems:
@@ -591,7 +592,12 @@ class ScanEngine:
         abort_sent = False
         try:
             while True:
-                res = self._rpc(lambda: op.poll(0.5), "op.wait")
+                try:
+                    res = self._rpc(lambda: op.poll(0.5), "op.wait")
+                except ServiceError as exc:
+                    if exc.code == ErrorCode.TIMEOUT:
+                        continue          # op.wait is repeatable; _rpc escalates after repeated loss
+                    raise
                 for rec in res["records"]:
                     if rec.get("kind") == "error":
                         self._log("error", f"{rec.get('label')}: {rec['error'].get('message')}")
@@ -627,7 +633,10 @@ class ScanEngine:
             raise ServiceError(err.get("code", ErrorCode.INTERNAL), err.get("message", "operation failed"))
         if res["state"] == "ABORTED":
             self._check()
-            raise Abort()
+            # Not requested by this client: the service stopped it (shutdown,
+            # lease taken away, ...).
+            err = res.get("error") or {}
+            raise Interrupted(f"the service aborted the operation ({err.get('message', 'no reason given')})")
         return res
 
     # ================================================================ workflows
