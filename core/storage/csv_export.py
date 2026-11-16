@@ -98,3 +98,19 @@ def export_csv(h5_path: Path | str, csv_path: Path | str | None = None) -> Path:
             for i in range(m):
                 w.writerow(["" if not np.isfinite(c[i]) else repr(float(c[i])) for c in a_cols])
     return csv_path
+
+
+def main(argv=None) -> int:
+    """``python -m core.storage.csv_export FILE.h5 [OUT.csv]``"""
+    import sys
+    args = sys.argv[1:] if argv is None else argv
+    if not args:
+        print(main.__doc__)
+        return 2
+    out = export_csv(args[0], args[1] if len(args) > 1 else None)
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

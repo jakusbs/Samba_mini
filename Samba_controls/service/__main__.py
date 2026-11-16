@@ -41,15 +41,15 @@ def _acquire_instance_lock(state_dir: Path):
             import fcntl
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        fh.seek(0)
-        info = fh.read().strip()
         fh.close()
+        try:
+            info = (state_dir / "service.pid").read_text(encoding="utf-8").strip()
+        except OSError:
+            info = ""
         return None, info
-    # Write our identity after the locked first byte region.
-    fh.seek(0)
-    fh.truncate()
-    fh.write(f" pid={os.getpid()}\n")
-    fh.flush()
+    # The locked byte stays locked for the process lifetime; who holds it is
+    # recorded next to it (readable while locked).
+    (state_dir / "service.pid").write_text(f"pid={os.getpid()}\n", encoding="utf-8")
     return fh, ""
 
 

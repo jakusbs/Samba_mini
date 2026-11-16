@@ -42,6 +42,8 @@ are reported before anything moves.
 
 ## 3. Phases
 
+Status 2026-11-16: phases 1–7 done; phase 8 (hardware validation) not started — see [progress.md](progress.md).
+
 1. **Audit and design** – this document and architecture.md.
 2. **Service core (simulation)** – protocol, device model, backend server with
    auth, lease, per-instrument workers, operations; simulated DAQ, lock-in,
