@@ -1,0 +1,37 @@
+name: Windows simulation tests
+
+on:
+  push:
+    branches: ["fix/control-and-acquisition-review"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulation:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      SAMBA_MINI_FAST_HASH: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Compile Python sources
+        run: python -m compileall -q Samba_controls Samba_mini core tests
+      - name: Run simulated service, driver and GUI tests
+        run: python -m pytest -q --timeout=180 --junitxml=test-results.xml
+      - name: Save test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: test-results.xml
+          if-no-files-found: ignore

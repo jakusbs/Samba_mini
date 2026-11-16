@@ -46,7 +46,10 @@ def test_reconnect_device_mid_run(admin_client, service, tmp_path):
                      Callbacks(point=points.append))
     eng.start()
     assert wait(lambda: len(points) >= 3)
-    admin_client.device("lockin").reconnect()                    # e.g. after a cable glitch
+    eng.pause()
+    assert wait(lambda: eng.state == "PAUSED")
+    eng.client.device("lockin").reconnect()                     # controlled recovery while held
+    eng.resume()
     t0 = time.time()
     while eng.result is None and time.time() - t0 < 60:
         if eng.state == "PAUSED":

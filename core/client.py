@@ -260,6 +260,10 @@ class ServiceClient:
         return self.call("lease.status")
 
     # ------------------------------------------------------------- devices
+    def for_run(self, run_id: str) -> "RunClient":
+        """A private scan capability; the shared GUI client stays manual."""
+        return RunClient(self, run_id)
+
     def device(self, name: str) -> "DeviceProxy":
         return DeviceProxy(self, name)
 
@@ -312,6 +316,24 @@ class ReadingValue:
         self.time = reading.t
         self.unit = reading.unit
         self.reading = reading
+
+
+class RunClient:
+    """Attach the run capability without changing the shared session/client."""
+
+    def __init__(self, client: ServiceClient, run_id: str):
+        self._client = client
+        self._run_id = run_id
+
+    def call(self, method: str, params: dict | None = None,
+             timeout_s: float = protocol.DEFAULT_REQUEST_TIMEOUT_S) -> Any:
+        return self._client.call(method, dict(params or {}, _run_id=self._run_id), timeout_s)
+
+    def device(self, name: str) -> "DeviceProxy":
+        return DeviceProxy(self, name)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 
 class DeviceProxy:

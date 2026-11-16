@@ -10,8 +10,8 @@ __version__ = "0.1.0"
 
 #: Wire protocol identifier.  Bump the trailing integer for incompatible
 #: changes; clients refuse to talk to a server with a different major.
-PROTOCOL = "samba-mini/1"
-PROTOCOL_MAJOR = 1
+PROTOCOL = "samba-mini/2"
+PROTOCOL_MAJOR = 2
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

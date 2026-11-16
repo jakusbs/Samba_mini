@@ -248,8 +248,9 @@ def test_devices_a_run_does_not_use_stay_free(admin_client, caplog):
     stage = c.device("stage_longitudinal")
 
     def run(required, use_stage_expected_free):
-        c.call("run.begin", {"required_devices": required, "workflow": "time"})
-        op = c.device("moke").start_operation("time_trace", coil_V=0.0, n_points=200, interval_s=0.02,
+        run = c.call("run.begin", {"required_devices": required, "workflow": "time"})
+        scan = c.for_run(run["run_id"])
+        op = scan.device("moke").start_operation("time_trace", coil_V=0.0, n_points=200, interval_s=0.02,
                                               acq_time_s=0.005, hall=False, lockin=True)
         op.poll(0.2)
         try:
@@ -271,7 +272,7 @@ def test_devices_a_run_does_not_use_stay_free(admin_client, caplog):
             t0 = time.time()
             while not op.done and time.time() - t0 < 10:
                 op.poll(0.5)
-            c.call("run.end", {})
+            scan.call("run.end", {})
 
     import logging
     caplog.set_level(logging.INFO, logger="Samba_controls.service.server")

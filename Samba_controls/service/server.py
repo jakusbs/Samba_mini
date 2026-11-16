@@ -33,6 +33,7 @@ from Samba_controls.service.devices.base import CallContext
 from Samba_controls.service.host import DeviceHost, build_devices
 from Samba_controls.service.lease import LeaseManager
 from Samba_controls.service.operations import FINAL_STATES, Operation, OperationManager
+from Samba_controls.service.worker import CancelToken
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ class ServiceServer:
         self._out: "queue.Queue[tuple]" = queue.Queue()
         self._ctx = zmq.Context()
         self._tls = threading.local()
+        self._control_lock = threading.RLock()
+        self._inflight: dict[str, set[str]] = {}
         self._stop = threading.Event()
         self._shutdown_reason = ""
         self.devices_list, notes = build_devices(cfg, state_dir)
@@ -168,15 +171,18 @@ class ServiceServer:
             self._out.put(("reply", ident, protocol.make_error(
                 None, ServiceError(ErrorCode.BAD_REQUEST, "message too large"))))
             return
-        self._pool.submit(self._handle, ident, payload)
+        self._pool.submit(self._handle, ident, payload, time.monotonic(), self.lease.generation())
 
-    def _handle(self, ident, payload: bytes) -> None:
+    def _handle(self, ident, payload: bytes, received_at: float | None = None,
+                lease_generation: CancelToken | None = None) -> None:
         rid = None
         try:
             msg = protocol.loads(payload)
             rid = msg.get("id") if isinstance(msg, dict) else None
             req = protocol.validate_request(msg)
             rid = req["id"]
+            req["_deadline"] = (received_at if received_at is not None else time.monotonic()) + req["timeout_s"]
+            req["_received_lease"] = lease_generation
             result = self.dispatch(req)
             reply = protocol.make_reply(rid, result)
         except ServiceError as exc:
@@ -228,6 +234,8 @@ class ServiceServer:
 
     # ================================================================ reconcile
     def _reconcile(self, reason: str) -> dict:
+        if self.host.run_cancel is not None:
+            self.host.run_cancel.cancel(f"lease ended: {reason}")
         wait_s = float(self.backend_cfg["reconcile_wait_s"])
         stopped = self.ops.abort_all(f"lease ended: {reason}", wait_s)
         problems = []
@@ -246,6 +254,8 @@ class ServiceServer:
 
     # ================================================================ dispatch
     def dispatch(self, req: dict) -> Any:
+        req.setdefault("_deadline", time.monotonic() + req["timeout_s"])
+        CancelToken(deadline=req["_deadline"]).raise_if_cancelled()
         method = req["method"]
         entry = self._methods.get(method)
         if entry is None:
@@ -260,8 +270,52 @@ class ServiceServer:
             if level == "admin" and not session.is_admin:
                 raise ServiceError(ErrorCode.FORBIDDEN, "administrator role required")
             if level == "lease":
-                self.lease.require(req["session"])
-        return fn(session, req["params"], req)
+                req["_lease_cancel"] = self._lease_token(req)
+        params = req["params"]
+        mutating = method in {"device.write", "device.connect", "device.disconnect",
+                              "device.reconnect", "op.start"}
+        command = params.get("command") if method == "device.command" else params.get("name")
+        if method == "device.command":
+            dev = self.host.device(_str(params, "device"))
+            info = dev.commands.get(command)
+            mutating = bool(info and info.mutating)
+        if mutating:
+            if self.read_only:
+                raise ServiceError(ErrorCode.FORBIDDEN, "read-only diagnostics mode")
+            device = _str(params, "device")
+            try:
+                with self._control_lock:
+                    req["_lease_cancel"] = self._lease_token(req)
+                    self._refuse_during_run(params, device, command, params.get("args"),
+                                           allow_stop=(command == "stop"))
+                    resources = self._resources(device, command, params.get("args"))
+                    if command != "stop" and any(resources & used for used in self._inflight.values()):
+                        raise ServiceError(ErrorCode.BUSY, "an instrument command is still finishing",
+                                           {"inflight": True})        # transient: retry when it is done
+                    req["_mutation_cancel"] = self._request_cancel(
+                        session, params, req, deadline=(method != "op.start"))
+                    key = protocol.new_id()
+                    self._inflight[key] = resources
+            except ServiceError as exc:
+                if method == "device.command":
+                    log.warning("refused %s.%s by %s (%s): %s", device, command,
+                                session.user["username"], session.client, exc.message)
+                elif method in {"device.connect", "device.disconnect", "device.reconnect"}:
+                    log.warning("%s %s by %s (%s) failed: %s: %s", method.split(".")[1],
+                                device, session.user["username"], session.client, exc.code, exc.message)
+                raise
+            try:
+                return fn(session, params, req)
+            finally:
+                with self._control_lock:
+                    self._inflight.pop(key, None)
+        if method == "run.begin":
+            with self._control_lock:
+                if self._inflight:
+                    raise ServiceError(ErrorCode.BUSY, "a device command is still finishing",
+                                       {"inflight": True})            # transient: the engine waits and retries
+                return fn(session, params, req)
+        return fn(session, params, req)
 
     def _register(self) -> None:
         m = self._methods
@@ -289,9 +343,9 @@ class ServiceServer:
         m["device.read"] = ("auth", self._read)
         m["device.write"] = ("lease", self._write)
         m["device.command"] = ("auth", self._command)
-        m["device.connect"] = ("lease", lambda s, p, r: self._device_action(s, p, "connect", self.host.connect))
+        m["device.connect"] = ("lease", lambda s, p, r: self._device_action(s, p, r, "connect", self.host.connect))
         m["device.disconnect"] = ("lease", self._disconnect)
-        m["device.reconnect"] = ("lease", lambda s, p, r: self._device_action(s, p, "reconnect",
+        m["device.reconnect"] = ("lease", lambda s, p, r: self._device_action(s, p, r, "reconnect",
                                                                              self.host.reconnect))
         m["op.start"] = ("lease", self._op_start)
         m["op.pause"] = ("lease", lambda s, p, r: self._op_ctl(p, "pause"))
@@ -418,8 +472,9 @@ class ServiceServer:
         return self.host.read(_str(p, "device"), attrs, min(r["timeout_s"], 60.0))
 
     def _write(self, s, p, r) -> Any:
-        self._refuse_during_run(p.get("device"))
-        return {"value": self.host.write(_str(p, "device"), _str(p, "attr"), p.get("value"))}
+        self._refuse_during_run(p, p.get("device"))
+        return {"value": self.host.write(_str(p, "device"), _str(p, "attr"), p.get("value"),
+                                        r["timeout_s"], self._request_cancel(s, p, r))}
 
     def _command(self, s, p, r) -> Any:
         dev = self.host.device(_str(p, "device"))
@@ -431,48 +486,94 @@ class ServiceServer:
             if self.read_only:
                 raise ServiceError(ErrorCode.FORBIDDEN, "read-only diagnostics mode: commands that change "
                                    "the instruments are disabled")
-            self.lease.require(s.token)
-            if dev.name != "moke":
-                try:
-                    self._refuse_during_run(dev.name, allow_stop=(name == "stop"))
-                except ServiceError:
-                    log.warning("refused %s.%s by %s (%s): the running measurement uses %s",
-                                dev.name, name, s.user["username"], s.client, dev.name)
-                    raise
-        ctx = CallContext(host=self.host, session_user=s.user["username"])
+            r["_lease_cancel"] = self._lease_token(r)
+            self._refuse_during_run(p, dev.name, name, p.get("args"), allow_stop=(name == "stop"))
+        cancel = (self._request_cancel(s, p, r) if info.mutating
+                  else CancelToken(deadline=r["_deadline"]))
+        ctx = CallContext(cancel=cancel, host=self.host, session_user=s.user["username"])
         args = p.get("args") or {}
         result = self.host.command(dev.name, name, args, ctx)
         if info.mutating and dev.PHYSICAL and not self.host.locked(dev.name):
-            # Manual actions (jog, move, set, zero ...) leave a trace; a run's own steps on its
-            # devices are not logged (they are in the data file).
             log.info("manual %s.%s(%s) by %s (%s)%s", dev.name, name,
                      ", ".join(f"{k}={v}" for k, v in args.items()), s.user["username"], s.client,
                      " during a measurement" if self.host.run_active else "")
         return result
 
-    def _refuse_during_run(self, device: str | None, allow_stop: bool = False) -> None:
-        """While an operation runs, refuse commands to the devices it uses.  A device the active
-        run did not declare (e.g. the stage during a time scan without stage positioning) stays
-        usable — still only by the lease holder."""
-        if allow_stop or self.ops.active() is None:
+    def _resources(self, device: str, command: str | None = None, args: dict | None = None) -> set[str]:
+        """Resolve logical endpoints to the instruments their mutations touch."""
+        dev = self.host.device(device)
+        if dev.PHYSICAL:
+            return {device}
+        if dev.KIND == "magnet":
+            return {dev.daq_name}
+        if dev.KIND == "moke":
+            args = args or {}
+            if command == "prepare":
+                return {dev.hall_name}
+            return ({dev.daq_name}
+                    | ({dev.hall_name} if args.get("hall", True) else set())
+                    | ({dev.lockin_name} if args.get("lockin", True) else set()))
+        return {device}
+
+    def _run_scope(self, p: dict) -> bool:
+        run_id = p.get("_run_id")
+        if run_id is None:
+            return False
+        if not self.host.run_active or run_id != self.host.run_id:
+            raise ServiceError(ErrorCode.INVALID_STATE, "this run has ended or was replaced")
+        return True
+
+    def _lease_token(self, req: dict) -> CancelToken:
+        current = self.lease.request_token(req["session"])
+        received = req.get("_received_lease")
+        if received is not None and received is not current:
+            raise ServiceError(ErrorCode.LEASE_REQUIRED, "the request belongs to an ended lease")
+        return current
+
+    def _request_cancel(self, s, p, r, deadline: bool = True) -> CancelToken:
+        if "_mutation_cancel" in r:
+            token = r["_mutation_cancel"]
+            token.raise_if_cancelled()
+            return token
+        parent = r.get("_lease_cancel") or self.lease.request_token(s.token)
+        if self._run_scope(p):
+            parent = self.host.run_cancel
+        token = CancelToken(parent=parent, deadline=r["_deadline"] if deadline else None)
+        token.raise_if_cancelled()
+        return token
+
+    def _refuse_during_run(self, p: dict, device: str | None, command: str | None = None,
+                           args: dict | None = None, allow_stop: bool = False) -> None:
+        own_run = self._run_scope(p)
+        if allow_stop:
             return
-        h = self.host
-        if device and h.run_active and h.run_devices is not None and device not in h.run_devices:
+        h, active = self.host, self.ops.active()
+        resources = self._resources(device, command, args) if device else set()
+        if own_run and active is None:
+            if h.run_devices is not None and not resources.issubset(h.run_devices):
+                raise ServiceError(ErrorCode.BUSY, "the run did not reserve these instruments")
+            return
+        if h.run_active:
+            if h.run_devices is not None and resources and resources.isdisjoint(h.run_devices):
+                return
+        elif active is None:
             return
         raise ServiceError(ErrorCode.BUSY, f"a measurement is running and uses {device}")
 
     def _disconnect(self, s, p, r):
         if self.host.run_active or self.ops.active() is not None:
             raise ServiceError(ErrorCode.BUSY, "a measurement is running")
-        return self._device_action(s, p, "disconnect", self.host.disconnect)
+        return self._device_action(s, p, r, "disconnect", self.host.disconnect)
 
-    def _device_action(self, s, p, action: str, fn) -> dict:
+    def _device_action(self, s, p, r, action: str, fn) -> dict:
         """Run a manual connect / disconnect / reconnect and log who asked and what came of it
         (the automatic connection at start is logged as one summary line)."""
         name = _str(p, "device")
+        self._refuse_during_run(p, name)
+        cancel = self._request_cancel(s, p, r)
         who = f"{s.user['username']} ({s.client})"
         try:
-            info = fn(name)
+            info = fn(name, timeout_s=r["timeout_s"], cancel=cancel)
         except ServiceError as exc:
             log.warning("%s %s by %s failed: %s: %s", action, name, who, exc.code, exc.message)
             raise
@@ -487,13 +588,17 @@ class ServiceServer:
     def _op_start(self, s, p, r) -> dict:
         dev = self.host.device(_str(p, "device"))
         info, bound = dev.bind_args(dev.operations, _str(p, "name"), p.get("args"))
+        self._refuse_during_run(p, dev.name, info.name, bound)
         op = Operation(dev.name, info.name, bound, s.token, s.user["username"])
+        op.cancel = self._request_cancel(s, p, r, deadline=False)
         ctx = CallContext(cancel=op.cancel, host=self.host, operation=op, session_user=s.user["username"])
         dev.require_usable()
         self.ops.start(op, lambda o: dev.run_operation(info.name, bound, ctx))
         return op.summary()
 
     def _op_ctl(self, p, action: str) -> dict:
+        if self.host.run_active and not self._run_scope(p):
+            raise ServiceError(ErrorCode.BUSY, "control this operation through its run")
         op = self.ops.get(_str(p, "op_id"))
         getattr(op, action)()
         return op.summary()
@@ -507,8 +612,8 @@ class ServiceServer:
         return result
 
     def _run_begin(self, s, p, r) -> dict:
-        if self.host.run_active:
-            raise ServiceError(ErrorCode.BUSY, "a run is already active")
+        if self.host.run_active or self.ops.active() is not None:
+            raise ServiceError(ErrorCode.BUSY, "a run or operation is already active")
         required = p.get("required_devices") or []
         missing = []
         for name in required:
@@ -522,19 +627,27 @@ class ServiceServer:
                                "required devices are not available: " + "; ".join(missing),
                                {"missing": missing})
         self.host.run_devices = {str(n) for n in required} if required else None
+        self.host.run_id = protocol.new_id()
+        self.host.run_cancel = self._request_cancel(s, {}, r, deadline=False)
         self.host.run_active = True
         self.host.run_info = {"user": s.user["username"], "workflow": p.get("workflow"),
                               "started": time.time(), "file": p.get("file"),
                               "devices": sorted(self.host.run_devices) if self.host.run_devices else None}
         self.publish("server", self.status_public())
-        return {"run_active": True, "mode": self.cfg.mode}
+        return {"run_active": True, "mode": self.cfg.mode, "run_id": self.host.run_id}
 
     def _run_end(self, s, p, r) -> dict:
+        if not self._run_scope(p):
+            raise ServiceError(ErrorCode.BUSY, "end the run through its owning client")
         if self.ops.active() is not None:
             raise ServiceError(ErrorCode.BUSY, "an operation is still running")
+        self.host.run_cancel.cancel("run ended")
         problems = []
         if p.get("cleanup", True):
             problems = self.host.cleanup_all(self.cfg.data.get("cleanup"))
+        if problems:
+            self.lease.release(s.token, "run cleanup failed", wait=False)
+            return {"run_active": True, "cleanup_problems": problems}
         self.host.run_active = False
         self.host.run_info = None
         self.host.run_devices = None

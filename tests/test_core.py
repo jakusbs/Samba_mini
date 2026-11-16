@@ -36,7 +36,7 @@ def test_protocol_rejects_unsafe_payloads():
     with pytest.raises(ServiceError):
         protocol.loads(bad)
     with pytest.raises(ServiceError) as e:
-        protocol.validate_request({"proto": "samba-mini/2", "id": "x" * 32, "method": "m"})
+        protocol.validate_request({"proto": "samba-mini/999", "id": "x" * 32, "method": "m"})
     assert e.value.code == ErrorCode.PROTOCOL_MISMATCH
     with pytest.raises(ServiceError):
         protocol.loads(b"{not json")
@@ -169,8 +169,9 @@ def test_accounts_hashing_prefs_and_migration_guards(tmp_path):
 
 def test_logout_blocked_during_run_and_manual_control_busy(admin_client):
     admin_client.acquire_lease()
-    admin_client.call("run.begin", {"required_devices": ["daq"]})
-    moke = admin_client.device("moke")
+    run = admin_client.call("run.begin", {"required_devices": ["daq"]})
+    scan = admin_client.for_run(run["run_id"])
+    moke = scan.device("moke")
     op = moke.start_operation("field_sweep", setpoints_V=[0.0] * 200, branch=[0] * 200, t_point_s=0.02,
                               settle_s=0.0, acq_time_s=0.005, hall=False, lockin=False)
     with pytest.raises(ServiceError) as e:
@@ -186,7 +187,7 @@ def test_logout_blocked_during_run_and_manual_control_busy(admin_client):
     op.abort()
     while not op.done:
         op.poll(0.5)
-    admin_client.call("run.end", {})
+    scan.call("run.end", {})
 
 
 # --------------------------------------------------------------------------- storage

@@ -20,13 +20,13 @@ device commands through each device's declared command list.
 
 Request::
 
-    {"proto": "samba-mini/1", "id": "<hex>", "method": "device.read",
+    {"proto": "samba-mini/2", "id": "<hex>", "method": "device.read",
      "session": "<token or null>", "params": {...}, "timeout_s": 5.0}
 
 Reply::
 
-    {"proto": "samba-mini/1", "id": "<hex>", "ok": true, "result": ...}
-    {"proto": "samba-mini/1", "id": "<hex>", "ok": false,
+    {"proto": "samba-mini/2", "id": "<hex>", "ok": true, "result": ...}
+    {"proto": "samba-mini/2", "id": "<hex>", "ok": false,
      "error": {"code": "LEASE_REQUIRED", "message": "...", "details": {...}}}
 """
 

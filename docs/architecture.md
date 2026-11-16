@@ -185,7 +185,7 @@ REQ/REP lock-step after a timeout); PUB/SUB gives notifications.  Alternatives
 considered: stdlib `multiprocessing.connection` (pickle — unsafe), HTTP/gRPC
 (more machinery than needed on one PC).  Bound to `127.0.0.1` only.
 
-Protocol details (see `core/protocol.py`): `proto: "samba-mini/1"` checked on
+Protocol details (see `core/protocol.py`): `proto: "samba-mini/2"` checked on
 every message; request `id`; structured errors `{code, message, details}`;
 per-request `timeout_s` capped at 120 s; JSON only — NaN/±inf and numpy
 arrays have explicit encodings, arrays restricted to numeric dtypes; methods
@@ -285,3 +285,44 @@ Raw per-sweep data are kept; the averaged B-sweep loop is in `/data/averaged`.
 `failed` or `interrupted`; a file that still says `running` after a crash is
 recognisable as partial.  CSV export reproduces MiniMoke's columns (with fixed
 units).
+
+## Review fixes: control boundaries and acquisition results
+
+A run now receives a private `run_id` capability from `run.begin`. The scan
+engine uses `client.for_run(run_id)`; the shared GUI client remains a manual
+client. The service reserves physical instruments throughout the run, including
+between operations and during synchronous spatial measurements. Logical magnet
+writes reserve the DAQ, and MOKE commands resolve their physical dependencies.
+Manual commands to unused devices remain available (including stage jogging
+during calibration time scans). A scoped client cannot command instruments the
+run did not reserve. Stops remain available to the lease holder.
+
+A mutating command, and `run.begin`, is refused with `BUSY` (details
+`inflight: true`) while another command on the same instrument (any, for
+`run.begin`) is still finishing. The engine treats that as transient at the
+start: it waits up to 30 s for the command (e.g. a jog clicked just before
+Start), abortably. An abort sends the stage stop only once the run has begun,
+the engine checks for an abort before every stage move, and a service error
+that arrives after the operator's abort ends the run as *aborted*, not
+*failed* (the error is logged).
+
+Lease reconciliation releases ownership only when operations have stopped and
+cleanup reports success. Administrator force-release retries reconciliation;
+it does not bypass a failed or still-running cleanup. Each lease and run has a
+cancellation generation so queued work cannot outlive its owner. Request
+budgets start at server receipt, include the RPC executor queue, and propagate
+through logical devices to physical workers. Work that has not started is
+dropped after expiry. A blocking vendor call already in progress can still
+finish; its outcome remains unknown after a timeout until cleanup/readback.
+
+Operation consumers drain all result pages before acting on a final state,
+including failure and abort. Lock-in field sweeps configure the instrument
+before calculating timing, use the applied time constant, and save both the
+requested parameters and applied settings/timing in the data file.
+
+Windows CI runs simulation, fake-driver, process and offscreen GUI tests.
+These checks do not validate actual NI, Hall-probe or stage hardware.
+
+The run capability changes the RPC contract to `samba-mini/2`. Restart both
+applications from the same checkout; mixed old/new clients are refused before
+control begins. Existing account and measurement files keep their schemas.
