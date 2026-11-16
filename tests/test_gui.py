@@ -1,5 +1,6 @@
 """GUI smoke tests (offscreen): windows build, log in, run through the UI."""
 
+import json
 import os
 import time
 
@@ -222,3 +223,43 @@ def test_right_panel_rows_plot_only(qapp):
     r.configure_for("b_sweep_dc")                       # no lock-in channels without the lock-in
     assert all(m["axis"] == "—" for m in r.sensors_meta() if m["name"].startswith("lockin"))
     assert {row.channel() for row in r.rows} == {"dc_signal", "intensity", "hall_field"}
+
+
+def test_scanlist_runs_n_scans_with_field_flip(qapp, service, tmp_path):
+    """Start on the Scanlist tab runs the Trajectory measurement N times (ABBA field flip)
+    and writes Samba's scanlist .txt; each scan is its own file."""
+    from core.gui.bridge import ServiceBridge
+    from core.storage.hdf5_writer import read_file
+    from Samba_mini.app import MainWindow
+
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    w.dir_edit.setText(str(tmp_path / "data"))
+    w.trajectory.set_workflow("time")
+    w.trajectory.set_params("time", {"duration": 0.1, "interval": 0.02, "acq_time": 0.01, "time_const": 0.1,
+                                     "volt": 0.0, "b": 0.2, "position_stage": False, "record_hall": True})
+    w.scanlist.n_scans.setValue(3)
+    w.scanlist.field_flip.setChecked(True)
+    w.scanlist.order_btn.click()                       # AB -> ABBA
+    w.scanlist.name.setText("flip test")
+    w.scanlist.name.textEdited.emit("flip test")
+    w.bottom_tabs.setCurrentWidget(w.scanlist)
+    w.start_run()
+    assert w._sl is not None
+    assert wait_until(qapp, lambda: w._sl is None and not w.running, 120)
+    txt = tmp_path / "data" / "ScanLists_Longitudinal" / "flip test.txt"
+    lines = txt.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "# polarity: relay_flip=0 field_flip=1 order=ABBA"
+    rows = [ln.split("\t") for ln in lines if not ln.startswith("#")]
+    assert len(rows) == 3 and all(r[1] == "+1" for r in rows)
+    signs = [float(r[2]) > 0 for r in rows]            # simulated Hall follows the coil: A B B
+    assert signs == [True, False, False], rows
+    phases = [read_file(r[0])["metadata"]["scanlist_phase"] for r in rows]
+    assert phases == ["A", "B", "B"]
+    coils = [json.loads(read_file(r[0])["metadata"]["params_json"])["b"] for r in rows]
+    assert coils == [0.2, -0.2, -0.2]
+    w.close()

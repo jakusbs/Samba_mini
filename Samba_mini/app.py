@@ -35,6 +35,7 @@ from core.gui.bridge import EngineBridge, ServiceBridge, call_async, error_text
 from core.gui.login import LoginDialog
 from core.plot_config import X_NATURAL, X_TIME
 from core.plot_widgets import Live1DWidget, Live2DWidget
+from core.polarity import flip_phase, phase_label
 from core.protocol import ErrorCode, ServiceError
 from core.scan import plans
 from core.scan.channels import SENSORS, sensors_for
@@ -46,6 +47,7 @@ from Samba_mini.panels.calibration import CalibrationPanel
 from Samba_mini.panels.config_list import SETUPS, ConfigListPanel
 from Samba_mini.panels.profile import ProfilePanel
 from Samba_mini.panels.right_panel import RightPanel
+from Samba_mini.panels.scanlist import ScanlistPanel
 from Samba_mini.panels.trajectory import TrajectoryPanel
 
 
@@ -73,6 +75,8 @@ class MainWindow(QMainWindow):
         self._run_state = "IDLE"
         self._progress = (0, 0)
         self._list = {"total": 1, "done": 0, "t0": None}     # scans in this run (scanlist: N)
+        self._sl: dict | None = None                           # running scanlist
+        self._sl_hall: list[float] = []                        # Hall readings of the current scan (mT)
         self._scan_t0: float | None = None
         self._map_data: dict[str, np.ndarray] = {}
         self._map_axes = None
@@ -159,7 +163,9 @@ class MainWindow(QMainWindow):
         self.trajectory = TrajectoryPanel(lambda: self.bridge)
         self.browser = DataBrowserPanel(self._data_dir)
         self.profile = ProfilePanel(lambda: self.bridge)
+        self.scanlist = ScanlistPanel()
         self.bottom_tabs.addTab(self.trajectory, "Trajectory")
+        self.bottom_tabs.addTab(self.scanlist, "Scanlist")
         self.bottom_tabs.addTab(self.browser, "Data Browser")
         self.bottom_tabs.addTab(self.profile, "Profile")
         self.v_split.addWidget(self.bottom_tabs)
@@ -286,6 +292,9 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, s=s: self.set_setup(s))
         self.trajectory.workflow_changed.connect(self._on_workflow_changed)
         self.trajectory.changed.connect(self._show_estimate)
+        self.trajectory.changed.connect(self._update_scanlist_info)
+        self.scanlist.changed.connect(self._update_scanlist_info)
+        self.config_list.config_selected.connect(lambda *_a: self._update_scanlist_info())
         self.right.plot_changed.connect(self._apply_plot_config)
         self.right.map_sensor_changed.connect(self._switch_map_sensor)
         self.right.colormap_changed.connect(self.map2d.set_colormap)
@@ -314,6 +323,7 @@ class MainWindow(QMainWindow):
         self._on_workflow_changed(self.trajectory.current)
         self.trajectory.set_setup(self.setup)
         self._show_estimate()
+        self._update_scanlist_info()
 
     # ================================================================ helpers
     def _data_dir(self) -> str:
@@ -358,8 +368,8 @@ class MainWindow(QMainWindow):
 
     @property
     def running(self) -> bool:
-        # The engine sets its result as the very last step of a run.
-        return self.engine is not None and self.engine.result is None
+        # The engine sets its result as the very last step of a run; a scanlist runs until its last scan.
+        return (self.engine is not None and self.engine.result is None) or self._sl is not None
 
     def _client(self):
         return self.bridge.client
@@ -620,61 +630,161 @@ class MainWindow(QMainWindow):
         self.config_list.set_items(setup, sorted(self.configs[setup]), new)
 
     # ================================================================ run control
-    def start_run(self) -> None:
+    def _check_ready(self):
+        """Checks shared by single runs and scanlists; returns (workflow, params, points) or None."""
         if self.running:
-            return
+            return None
         c = self._client()
         if self.bridge.probe(1.5) is None:
             QMessageBox.warning(self, "Device service", "The device service is not running. "
                                 "Start Samba_controls first.")
-            return
+            return None
         if not c.session and not self.show_login():
-            return
+            return None
         wf = self.trajectory.workflow()
         try:
             params = wf.coerce(self.trajectory.params())
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid parameters", str(exc))
-            return
-        n, secs, msg = self.trajectory.estimate()
+            return None
+        n, _secs, msg = self.trajectory.estimate()
         if msg:
             QMessageBox.warning(self, "Cannot start", msg)
-            return
-        mode = (self.bridge.hello_info or {}).get("mode")
-        if mode == "real":
-            moves = wf.uses_stage == "required" or params.get("position_stage")
-            text = (f"Start {wf.title} on the REAL setup?\n\nThe coil command will be set"
-                    + (", the lock-in oscillator switched on" if wf.uses_lockin else "")
-                    + (" and the stage moved" if moves else "") + ".")
-            if QMessageBox.question(self, "Real hardware", text) != QMessageBox.StandardButton.Yes:
-                return
+            return None
+        return wf, params, n
+
+    def _confirm_real(self, wf, params: dict, what: str) -> bool:
+        if (self.bridge.hello_info or {}).get("mode") != "real":
+            return True
+        moves = wf.uses_stage == "required" or params.get("position_stage")
+        text = (f"Start {what} on the REAL setup?\n\nThe coil command will be set"
+                + (", the lock-in oscillator switched on" if wf.uses_lockin else "")
+                + (" and the stage moved" if moves else "") + ".")
+        return QMessageBox.question(self, "Real hardware", text) == QMessageBox.StandardButton.Yes
+
+    def _take_control(self) -> bool:
+        c = self._client()
         try:
             if not c.lease_holder:
                 c.acquire_lease()
         except ServiceError as exc:
             QMessageBox.warning(self, "Control of the setup", error_text(exc))
-            return
+            return False
         self._update_control_btn()
+        return True
+
+    def start_run(self) -> None:
+        """Start: a scanlist while the Scanlist tab is open (as in Samba), else one measurement."""
+        if self.bottom_tabs.currentWidget() is self.scanlist:
+            self.start_scanlist()
+            return
+        ready = self._check_ready()
+        if not ready:
+            return
+        wf, params, n = ready
+        if not self._confirm_real(wf, params, wf.title) or not self._take_control():
+            return
+        self._sl = None
+        self._run_t0 = time.time()
+        self._list = {"total": 1, "done": 0}
+        self._set_running_ui(True)
+        self._launch(wf, params, n)
+
+    def _launch(self, wf, params: dict, n: int, extra_meta: dict | None = None, label: str = "") -> None:
         meta = self.trajectory.metadata()
         data_dir = self._data_dir()
         notebook = self.prefs.get("lab_notebook") or os.path.join(data_dir, "lab_notebook_SambaMini.csv")
+        em = {k: meta[k] for k in RUN_META_KEYS if k in meta}
+        em.update(extra_meta or {})
         req = RunRequest(wf.key, params, setup=self.setup, geometry=meta["incidence"], sample=meta["sample"],
                          operator=meta["operator"], notes=meta["notes"],
                          config_name=self.config_list.current_name() or "", save_dir=data_dir,
                          export_csv=bool(self.prefs.get("export_csv", False)), lab_notebook=notebook,
-                         extra_metadata={k: meta[k] for k in RUN_META_KEYS if k in meta})
+                         extra_metadata=em)
         self._prepare_plots(wf.key, params, n)
-        self.engine = ScanEngine(c, req, self.engine_bridge.callbacks())
-        self._run_t0 = time.time()
-        self._scan_t0 = self._run_t0
-        self._list = {"total": 1, "done": 0}
+        self.engine = ScanEngine(self._client(), req, self.engine_bridge.callbacks())
+        self._scan_t0 = time.time()
         self._progress = (0, n)
-        self._set_running_ui(True)
+        self._sl_hall = []
         self.engine.start()
-        self._log("info", f"Started {wf.title} ({n} points)")
+        self._log("info", f"Started {wf.title} ({n} points){label}")
+
+    # ---------------------------------------------------------------- scanlist
+    def start_scanlist(self) -> None:
+        ready = self._check_ready()
+        if not ready:
+            return
+        wf, params, n = ready
+        sv = self.scanlist.values()
+        if sv["field_flip"] and abs(float(params.get("b", 0.0))) == 0.0:
+            QMessageBox.warning(self, "Field flip", "The coil command is 0 V, so reversing it does nothing. "
+                                "Set the coil command in the Hardware box, or switch the field flip off.")
+            return
+        what = f"a scanlist of {sv['n_scans']} × {wf.title}"
+        if not self._confirm_real(wf, params, what) or not self._take_control():
+            return
+        self._sl = {"wf": wf, "params": params, "n": n, "i": 0, "total": sv["n_scans"], "flip": sv["field_flip"],
+                    "order": sv["order"], "name": sv["name"], "results": [], "stop": False,
+                    "dir": os.path.join(self._data_dir(), f"ScanLists_{SETUP_LABEL[self.setup]}")}
+        self._run_t0 = time.time()
+        self._list = {"total": sv["n_scans"], "done": 0}
+        self._set_running_ui(True)
+        self._log("info", f"Scanlist '{sv['name']}': {sv['n_scans']} × {wf.title}"
+                  + (f", field flip {sv['order']}" if sv["field_flip"] else ""))
+        self._next_scan()
+
+    def _next_scan(self) -> None:
+        sl = self._sl
+        if sl is None:
+            return
+        if sl["stop"] or sl["i"] >= sl["total"]:
+            self._finish_scanlist()
+            return
+        i = sl["i"]
+        params = dict(sl["params"])
+        phase = flip_phase(i, sl["order"]) if sl["flip"] else 0
+        if phase:
+            params["b"] = -float(params["b"])
+        self._list["done"] = i
+        self.scanlist.mark(i, "running")
+        label = f" — scan {i + 1}/{sl['total']}"
+        if sl["flip"]:
+            label += f", field {phase_label(phase)} (coil {params['b']:+.4g} V)"
+        self._launch(sl["wf"], params, sl["n"], {"scanlist_name": sl["name"], "scanlist_index": i + 1,
+                                                 "scanlist_phase": phase_label(phase)}, label)
+
+    def _scanlist_scan_done(self, result: dict) -> bool:
+        """Record the finished scan; True when the next scan should start."""
+        sl = self._sl
+        status = result.get("status")
+        self.scanlist.mark(sl["i"], status or "?", result.get("path") or "")
+        if status == "completed" and result.get("path"):
+            hall = [h for h in self._sl_hall if h == h]
+            field_T = float(np.median(hall)) / 1000.0 if hall else float("nan")
+            sl["results"].append((result["path"], +1, field_T))
+        elif result.get("path"):
+            self._log("warning", f"{status} scan not recorded in the scanlist: {result['path']}")
+        sl["i"] += 1
+        return (status == "completed" and not sl["stop"] and sl["i"] < sl["total"]
+                and not result.get("cleanup_problems"))
+
+    def _finish_scanlist(self) -> None:
+        sl, self._sl = self._sl, None
+        if sl is None:
+            return
+        if not sl["results"]:
+            self._log("warning", f"Scanlist '{sl['name']}' ended without a completed scan; no list written.")
+            return
+        try:
+            path = write_scanlist(sl["dir"], sl["name"], sl["results"], sl["flip"], sl["order"])
+        except OSError as exc:
+            self._log("error", f"Scanlist file not written: {exc}")
+            QMessageBox.warning(self, "Scanlist", f"The scanlist file could not be written:\n{exc}")
+            return
+        self._log("info", f"✓ Scanlist complete — {len(sl['results'])}/{sl['total']} scans — {path}")
 
     def toggle_pause(self) -> None:
-        if not self.running:
+        if not self.running or self.engine is None or self.engine.result is not None:
             return
         if self._run_state == "PAUSED":
             self.engine.resume()
@@ -682,7 +792,9 @@ class MainWindow(QMainWindow):
             self.engine.pause()
 
     def abort_run(self) -> None:
-        if self.running:
+        if self._sl is not None:
+            self._sl["stop"] = True            # Samba: Abort ends the whole scanlist
+        if self.engine is not None and self.engine.result is None:
             self.engine.abort()
             self.abort_btn.setEnabled(False)
 
@@ -691,6 +803,7 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(running)
         self.abort_btn.setEnabled(running)
         self.trajectory.set_editable(not running)
+        self.scanlist.set_editable(not running)
         self.config_list.setEnabled(not running)
         for b in self.setup_btns.values():
             b.setEnabled(not running)
@@ -722,9 +835,6 @@ class MainWindow(QMainWindow):
         self._progress = (done, total)
 
     def _on_finished(self, result: dict) -> None:
-        self._set_running_ui(False)
-        self._run_state = "IDLE"
-        self._tint("IDLE")
         status = result.get("status")
         text = f"Run {status}: {result.get('points')}/{result.get('points_planned')} points"
         if result.get("path"):
@@ -744,7 +854,40 @@ class MainWindow(QMainWindow):
             self.browser.refresh()
         except Exception:  # noqa: BLE001
             pass
+        if self._sl is not None:
+            if self._scanlist_scan_done(result):
+                QTimer.singleShot(0, self._next_scan)
+                return
+            self._finish_scanlist()
+        self._set_running_ui(False)
+        self._run_state = "IDLE"
+        self._tint("IDLE")
         self._update_status_bar()
+        self._show_estimate()
+
+    def _update_scanlist_info(self) -> None:
+        wf = self.trajectory.workflow()
+        n, secs, msg = self.trajectory.estimate()
+        cfg = self.config_list.current_name() or ""
+        k = self.scanlist.values()["n_scans"]
+        if msg:
+            plan = f"<span style='color:#f38ba8'>{msg}</span>"
+        else:
+            each = _hms(secs) if secs is not None else "—"
+            total = _hms(secs * k) if secs is not None else "—"
+            plan = (f"Each scan: <b>{n}</b> points, ≈ {each}<br>{k} scans: ≈ <b>{total}</b>"
+                    + (" + moves" if wf.key in ("x_sweep", "y_sweep", "xy_sweep") else ""))
+        p = self.trajectory.params()
+        sv = self.scanlist.values()
+        if sv["field_flip"] and "b" in p and float(p["b"]) == 0.0:
+            plan += ("<br><span style='color:#fab387'>Coil command is 0 V: the field flip would do nothing "
+                     "(set it in the Hardware box).</span>")
+        self.scanlist.set_measurement(f"{wf.title}" + (f"  ·  {cfg}" if cfg else ""),
+                                      flip_allowed="b" in {p.name for p in wf.params}, plan_html=plan)
+        if self._sl is None:
+            self.scanlist.preview(float(p["b"]) if "b" in p else None)
+        self.scanlist.set_auto_name(self.trajectory.meta.build_scan_name(
+            volt=float(p.get("volt", 0.0)), freq_Hz=float(p.get("lockin_freq", 0.0)), config_name=cfg or wf.short))
 
     # ================================================================ plots
     def _prepare_plots(self, key: str, params: dict, n: int) -> None:
@@ -820,6 +963,10 @@ class MainWindow(QMainWindow):
             shown = self.right.map_combo.currentData() or "dc_signal"
             self.map2d.update_point(ev["ix"], ev["iy"], vals.get(shown, math.nan))
         rec = ev.get("record", {})
+        if self._sl is not None:
+            h = rec.get("hall_field_mT")
+            if isinstance(h, (int, float)):
+                self._sl_hall.append(float(h))
         self.status_lbl.setText(
             f"Point {self._progress[0]}/{self._progress[1]} — coil {rec.get('coil_V', math.nan):+.4g} V, "
             f"Hall {rec.get('hall_field_mT', math.nan):.4g} mT, DC {rec.get('balanced_V', math.nan):.5g} V")
@@ -881,7 +1028,7 @@ class MainWindow(QMainWindow):
             if ans != QMessageBox.StandardButton.Yes:
                 ev.ignore()
                 return
-            self.engine.abort()
+            self.abort_run()
             loop = QEventLoop()
             t0 = time.time()
             while self.running and time.time() - t0 < 120:
@@ -899,6 +1046,28 @@ class MainWindow(QMainWindow):
             pass
         self.bridge.close()
         super().closeEvent(ev)
+
+
+def write_scanlist(directory: str, name: str, results: list, field_flip: bool, order: str) -> str:
+    """Samba's scanlist .txt: header comments, then path / relay_sign / field_T per scan.
+
+    The polarity comment records the field flip and order; there is no relay
+    on the MiniMoke setups, so relay_sign is always +1.  field_T is the median
+    Hall reading of the scan in tesla (NaN without Hall readings).
+    """
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{name}.txt")
+    k = 2
+    while os.path.exists(path):                      # same name again: _2, _3 … (Samba)
+        path = os.path.join(directory, f"{name}_{k}.txt")
+        k += 1
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# Scanlist: {name}  {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+        f.write(f"# polarity: relay_flip=0 field_flip={int(bool(field_flip))} order={order}\n")
+        f.write("# path\trelay_sign\tfield_T\n")
+        for fn, rs, ft in results:
+            f.write(f"{fn}\t{rs:+d}\t{ft:.6f}\n")
+    return path
 
 
 def _vsep() -> QFrame:
