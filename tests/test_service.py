@@ -240,7 +240,7 @@ def test_manual_connect_results_are_logged(admin_client, caplog):
     assert any(l.startswith(f"connect no_such_device by {who} failed:") for l in lines)
 
 
-def test_devices_a_run_does_not_use_stay_free(admin_client):
+def test_devices_a_run_does_not_use_stay_free(admin_client, caplog):
     """During a run only the devices it declared are locked: the stage can be moved to focus
     during a time scan, but not during a run that uses it; the run's own devices stay locked."""
     c = admin_client
@@ -273,5 +273,12 @@ def test_devices_a_run_does_not_use_stay_free(admin_client):
                 op.poll(0.5)
             c.call("run.end", {})
 
+    import logging
+    caplog.set_level(logging.INFO, logger="Samba_controls.service.server")
     run(["daq", "moke", "lockin"], use_stage_expected_free=True)                       # calibration scan
     run(["daq", "moke", "lockin", "stage_longitudinal"], use_stage_expected_free=False)  # e.g. X-sweep
+    lines = [r.getMessage() for r in caplog.records if r.name == "Samba_controls.service.server"]
+    assert any(m.startswith("manual stage_longitudinal.jog(axis=x, delta_mm=0.01) by admin")
+               and m.endswith("during a measurement") for m in lines)        # the focusing move is logged
+    assert any(m.startswith("refused stage_longitudinal.jog by admin") for m in lines)
+    assert any(m.startswith("refused daq.set_outputs by admin") for m in lines)
