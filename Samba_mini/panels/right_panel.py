@@ -57,6 +57,9 @@ class SensorRow(QWidget):
         self.axis = NoScrollComboBox()
         self.axis.addItems(AXES)
         self.axis.setFixedWidth(58)
+        for combo, n in ((self.dev, 6), (self.ch, 10)):
+            combo.setSizeAdjustPolicy(NoScrollComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(n)
         for w, stretch in ((self.cb, 0), (self.dev, 3), (self.ch, 4), (self.axis, 0)):
             w.setMinimumHeight(24)
             lay.addWidget(w, stretch)

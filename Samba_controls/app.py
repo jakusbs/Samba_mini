@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon
-from PyQt6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                              QPushButton, QSplitter, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 from core.config import machine
@@ -75,11 +75,8 @@ class ControlsWindow(QMainWindow):
         self.svc_badge = QLabel("SERVICE STOPPED")
         self.svc_badge.setObjectName("offline_badge")
         h.addWidget(self.svc_badge)
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["mode from configuration", "real", "simulation"])
-        self.mode_combo.setToolTip("Mode used when this window starts the service")
-        h.addWidget(self.mode_combo)
         self.start_btn = QPushButton(" Start service")
+        self.start_btn.setToolTip("Start the device service on the real instruments")
         self.start_btn.setObjectName("start_btn")
         self.stop_btn = QPushButton(" Stop service")
         self.stop_btn.setObjectName("abort_btn")
@@ -171,29 +168,25 @@ class ControlsWindow(QMainWindow):
             self._after_ready()
 
     def start_service(self) -> None:
-        mode = None if self.mode_combo.currentIndex() == 0 else self.mode_combo.currentText()
+        """Always the real instruments: simulation is only for development, from the command line
+        (``scripts\\service_console.bat --mode simulation``), never from this window."""
+        mode = "real"
         info = self.bridge.probe(1.0)
         if info is not None:
-            if mode and mode != info["mode"]:
-                self._msg("warning", f"The service is already running in {info['mode']} mode; "
-                                     f"stop it first to start it in {mode} mode.")
+            if info["mode"] != mode:
+                self._msg("warning", f"A {info['mode']} service (started from the command line) is running; "
+                                     "stop it to start the real one.")
             self._after_ready()
             return
         cfg = machine.load()
         if cfg.status == "defaults":            # no machine.toml on this PC yet
-            if mode == "real":
-                if not self._offer_minimoke_import():
-                    self._msg("info", "Service not started: real hardware needs a machine configuration "
-                                      "(instrument addresses).")
-                    return
-                cfg = machine.load()
-            elif mode is None:
-                self._msg("info", "No machine configuration yet, so the service starts in SIMULATION. "
-                                  "To use the instruments, choose 'real' and press Start service: you will "
-                                  "be offered the import of MiniMoke's settings.")
-        if cfg.status != "defaults":
-            for p in cfg.problems:
-                self._msg("warning", f"configuration: {p}")
+            if not self._offer_minimoke_import():
+                self._msg("info", "Service not started: the instruments need a machine configuration "
+                                  "(their addresses). Import MiniMoke's settings to create it.")
+                return
+            cfg = machine.load()
+        for p in cfg.problems:
+            self._msg("warning", f"configuration: {p}")
         self._set_badge("STARTING…", "sim_badge")
         self.proc.start(mode)
         self._we_started = True
