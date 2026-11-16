@@ -290,7 +290,8 @@ class ServiceServer:
                                            allow_stop=(command == "stop"))
                     resources = self._resources(device, command, params.get("args"))
                     if command != "stop" and any(resources & used for used in self._inflight.values()):
-                        raise ServiceError(ErrorCode.BUSY, "an instrument command is still finishing")
+                        raise ServiceError(ErrorCode.BUSY, "an instrument command is still finishing",
+                                           {"inflight": True})        # transient: retry when it is done
                     req["_mutation_cancel"] = self._request_cancel(
                         session, params, req, deadline=(method != "op.start"))
                     key = protocol.new_id()
@@ -311,7 +312,8 @@ class ServiceServer:
         if method == "run.begin":
             with self._control_lock:
                 if self._inflight:
-                    raise ServiceError(ErrorCode.BUSY, "a device command is still finishing")
+                    raise ServiceError(ErrorCode.BUSY, "a device command is still finishing",
+                                       {"inflight": True})            # transient: the engine waits and retries
                 return fn(session, params, req)
         return fn(session, params, req)
 

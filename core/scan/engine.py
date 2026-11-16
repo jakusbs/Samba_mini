@@ -52,6 +52,7 @@ IDLE, PREPARING, RUNNING, PAUSED, STOPPING, FINISHED = (
 UM_PER_MM = 1000.0
 INITIAL_FIELD_WAIT_S = 1.0          # MiniMoke: "Setting magnetic field ..., waiting 1 s"
 BACKEND_LOST_AFTER = 3              # consecutive RPC timeouts
+BEGIN_WAIT_S = 30.0                 # wait this long for a manual command (e.g. a jog) to finish before starting
 
 
 class Abort(Exception):
@@ -104,6 +105,7 @@ class ScanEngine:
         self._abort = threading.Event()
         self._pause = threading.Event()
         self._lease_lost = threading.Event()
+        self._began = threading.Event()       # run.begin accepted: from here on the run may move the stage
         self._thread: threading.Thread | None = None
         self._op: OperationHandle | None = None
         self._writer: ScanWriter | None = None
@@ -162,7 +164,9 @@ class ScanEngine:
                 op.abort()
             except ServiceError as exc:
                 self._log("warning", f"abort not forwarded to the operation: {exc.message}")
-        if self.wf.uses_stage == "required" or self.params.get("position_stage"):
+        # Before run.begin the run has not moved the stage, and a stop sent then would only make
+        # run.begin wait for it; the engine thread checks the abort flag before its first move.
+        if self._began.is_set() and (self.wf.uses_stage == "required" or self.params.get("position_stage")):
             def stop_stage():   # stop a move that the engine thread may be waiting for
                 try:
                     self.client.device(f"stage_{self.req.setup}").command("stop", timeout_s=15.0)
@@ -241,6 +245,25 @@ class ScanEngine:
         self._rpc_failures = 0
         return result
 
+    def _begin_run(self, required: list[str]) -> dict:
+        """run.begin, waiting (up to BEGIN_WAIT_S, abortable) while the service is still finishing
+        a device command — e.g. a jog the operator clicked just before Start."""
+        deadline = time.monotonic() + BEGIN_WAIT_S
+        told = False
+        while True:
+            self._check()
+            try:
+                return self._rpc(lambda: self.client.call("run.begin", {"required_devices": required,
+                                                                     "workflow": self.wf.key}), "run.begin")
+            except ServiceError as exc:
+                if (exc.code != ErrorCode.BUSY or not exc.details.get("inflight")
+                        or time.monotonic() >= deadline):
+                    raise
+                if not told:
+                    self._log("info", f"Waiting for a device command to finish before starting ({exc.message}).")
+                    told = True
+            self._abort.wait(0.1)
+
     def _dev(self, name: str):
         return self.client.device(name)
 
@@ -258,10 +281,11 @@ class ScanEngine:
             if not self.client.lease_holder:
                 self.client.acquire_lease()
             required = self.wf.required_devices(self.params, self.req.setup)
-            run = self._rpc(lambda: self.client.call("run.begin", {"required_devices": required,
-                                                             "workflow": self.wf.key}), "run.begin")
+            run = self._begin_run(required)
             self.client = self.client.for_run(run["run_id"])
             began = True
+            self._began.set()
+            self._check()                       # aborted while run.begin was on its way
             self._open_file(required)
             self._set_state(RUNNING, "")
             body = {"b_sweep_dc": self._run_b_sweep, "b_sweep_lockin": self._run_b_sweep,
@@ -274,7 +298,13 @@ class ScanEngine:
         except Interrupted as exc:
             status, message = "interrupted", f"{exc}; hardware state not verified by this client"
         except ServiceError as exc:
-            status, message = "failed", f"{exc.code}: {exc.message}"
+            if self._abort.is_set() and not self._lease_lost.is_set():
+                # The operator's abort raced a service call (e.g. the stage stop it sent was still
+                # in flight): the run was aborted, not failed.  Keep the error in the log.
+                status, message = "aborted", "aborted by the operator"
+                self._log("warning", f"after the abort: {exc.code}: {exc.message}")
+            else:
+                status, message = "failed", f"{exc.code}: {exc.message}"
         except StorageError as exc:
             status, message = "failed", f"data file error: {exc}"
         except Exception as exc:  # noqa: BLE001
@@ -285,6 +315,8 @@ class ScanEngine:
             try:
                 if status == "completed" and self.wf.uses_stage == "required":
                     self._return_to_start()
+            except (Abort, Interrupted):
+                self._log("info", "Not returning to the start position: the run was stopped.")
             except Exception as exc:  # noqa: BLE001
                 self._log("warning", f"could not return to the start position: {exc}")
             try:
@@ -554,6 +586,7 @@ class ScanEngine:
             self._sleep(INITIAL_FIELD_WAIT_S)
 
     def _move_xy_um(self, x_um: float, y_um: float) -> tuple[float, float]:
+        self._check()                           # never start a move after the operator aborted
         stage = self._dev(f"stage_{self.req.setup}")
         self._log("info", f"Moving {self.req.setup} stage to ({x_um:g} um, {y_um:g} um)")
         res = self._rpc(lambda: stage.command("move_xy", x_mm=x_um / UM_PER_MM, y_mm=y_um / UM_PER_MM),

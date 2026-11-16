@@ -9,7 +9,7 @@ import pytest
 from core import protocol
 from core.client import OperationHandle
 from core.protocol import ErrorCode, ServiceError
-from core.scan.engine import Interrupted, RunRequest, ScanEngine
+from core.scan.engine import Callbacks, Interrupted, RunRequest, ScanEngine
 from core.storage.hdf5_writer import read_file
 from Samba_controls.service.lease import LeaseManager
 from Samba_controls.service.operations import Operation
@@ -285,3 +285,90 @@ def test_old_executor_request_does_not_use_a_reacquired_lease(admin_client, serv
     server._handle([b"old-lease-request"], protocol.dumps(request),
                    received_at=time.monotonic(), lease_generation=generation)
     assert writes == []
+
+
+# ------------------------------------------------------------------ Start → Abort races
+X_SWEEP = dict(x_min=0, x_max=20, x_step=10, y=0, b=0.0, repeat_num=1, settle_time=0.0,
+               field_settle_s=0.0, record_hall=False, **FAST_LOCKIN)
+TIME_SCAN = dict(b=0.0, duration=0.3, interval=0.05, x=0, y=0, position_stage=False, record_hall=False,
+                 **FAST_LOCKIN)
+
+
+def _command_in_flight(service, resources):
+    """Make the service see a device command still finishing on *resources* (as during a jog,
+    or the stage stop an abort sends).  Returns a function that ends it."""
+    server = service.server
+    with server._control_lock:
+        server._inflight["test-in-flight"] = set(resources)
+
+    def done():
+        with server._control_lock:
+            server._inflight.pop("test-in-flight", None)
+    return done
+
+
+def _engine(client, workflow, params, tmp_path, logs):
+    req = RunRequest(workflow, params, setup="longitudinal", sample="S1", operator="op",
+                     save_dir=str(tmp_path / "data"), config_name="cfg", lab_notebook=str(tmp_path / "nb.csv"))
+    return ScanEngine(client, req, Callbacks(log=lambda level, msg: logs.append(msg)))
+
+
+def test_run_begin_waits_for_a_command_that_is_still_finishing(admin_client, service, tmp_path):
+    """Start right after a manual command (e.g. a jog still moving): the run waits for it instead
+    of failing with BUSY."""
+    done = _command_in_flight(service, {"stage_longitudinal"})
+    logs = []
+    eng = _engine(admin_client, "time", TIME_SCAN, tmp_path, logs)
+    try:
+        eng.start()
+        assert wait_for(lambda: any("Waiting for a device command" in m for m in logs), 10)
+        assert eng.state == "PREPARING" and not service.server.host.run_active
+    finally:
+        done()
+    eng.join(60)
+    assert eng.result["status"] == "completed", eng.result
+
+
+def test_abort_while_the_run_waits_to_begin_is_aborted_not_failed(admin_client, service, tmp_path):
+    """Regression (CI run #6 hung on Samba_mini's 'Run failed' box): Start then Abort while a
+    command was in flight ended the run 'failed: BUSY a device command is still finishing'."""
+    done = _command_in_flight(service, {"stage_longitudinal"})
+    logs = []
+    eng = _engine(admin_client, "x_sweep", X_SWEEP, tmp_path, logs)
+    try:
+        eng.start()
+        assert wait_for(lambda: any("Waiting for a device command" in m for m in logs), 10)
+        eng.abort()
+        eng.join(30)
+    finally:
+        done()
+    assert eng.result["status"] == "aborted", eng.result
+    assert not service.server.host.run_active
+
+
+def test_service_error_after_an_abort_counts_as_aborted(admin_client, service, tmp_path):
+    """The abort's own stage stop can still be in flight when the engine's next stage command
+    arrives; that refusal is part of the abort, not a failure (it is still logged)."""
+    logs = []
+    eng = _engine(admin_client, "x_sweep", X_SWEEP, tmp_path, logs)
+
+    def move_hits_the_aborts_stop(x_um, y_um):
+        eng._abort.set()
+        raise ServiceError(ErrorCode.BUSY, "an instrument command is still finishing", {"inflight": True})
+
+    eng._move_xy_um = move_hits_the_aborts_stop
+    res = eng.run()
+    assert res["status"] == "aborted", res
+    assert any("after the abort: BUSY" in m for m in logs)
+    assert not service.server.host.run_active                      # run.end and cleanup still ran
+
+
+def test_abort_before_the_run_began_sends_no_stage_stop(admin_client, tmp_path, monkeypatch):
+    """Before run.begin the run has not moved anything; a stop then only made run.begin BUSY."""
+    eng = _engine(admin_client, "x_sweep", X_SWEEP, tmp_path, [])
+    asked = []
+    monkeypatch.setattr(eng.client, "device", lambda name: asked.append(name))
+    eng.abort()
+    time.sleep(0.2)
+    assert asked == []
+    assert eng.run()["status"] == "aborted"

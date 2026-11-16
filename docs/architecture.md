@@ -297,6 +297,15 @@ Manual commands to unused devices remain available (including stage jogging
 during calibration time scans). A scoped client cannot command instruments the
 run did not reserve. Stops remain available to the lease holder.
 
+A mutating command, and `run.begin`, is refused with `BUSY` (details
+`inflight: true`) while another command on the same instrument (any, for
+`run.begin`) is still finishing. The engine treats that as transient at the
+start: it waits up to 30 s for the command (e.g. a jog clicked just before
+Start), abortably. An abort sends the stage stop only once the run has begun,
+the engine checks for an abort before every stage move, and a service error
+that arrives after the operator's abort ends the run as *aborted*, not
+*failed* (the error is logged).
+
 Lease reconciliation releases ownership only when operations have stopped and
 cleanup reports success. Administrator force-release retries reconciliation;
 it does not bypass a failed or still-running cleanup. Each lease and run has a
