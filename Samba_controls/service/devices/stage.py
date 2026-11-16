@@ -182,10 +182,10 @@ class StageBase(Device):
             self.set_state(DevState.ON, "stopped")
 
     def _wait(self, axis: str, ctx: CallContext | None) -> None:
-        deadline = time.monotonic() + self.move_timeout_s
+        deadline = time.perf_counter() + self.move_timeout_s
         while self.hw_is_moving(axis):
             cancelled = (ctx is not None and ctx.cancel.cancelled) or self._stop_event.is_set()
-            if cancelled or time.monotonic() > deadline:
+            if cancelled or time.perf_counter() > deadline:
                 try:
                     self.hw_stop(axis)
                 finally:

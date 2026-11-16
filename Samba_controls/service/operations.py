@@ -84,7 +84,7 @@ class Operation:
         self.cancel.raise_if_cancelled()
         if not self.pause_requested:
             return 0.0
-        t0 = time.monotonic()
+        t0 = time.perf_counter()
         with self._cond:
             self.state = PAUSED
             self._cond.notify_all()
@@ -92,7 +92,7 @@ class Operation:
         while not self._resume.wait(0.1):
             self.cancel.raise_if_cancelled()
         self.cancel.raise_if_cancelled()
-        held = time.monotonic() - t0
+        held = time.perf_counter() - t0
         with self._cond:
             self.paused_total_s += held
             if self.state == PAUSED:

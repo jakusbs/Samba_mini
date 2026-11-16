@@ -5,7 +5,7 @@ worker thread.
 * ``magnet``  -- coil command (through the DAQ) and field readback (Hall probe).
 * ``moke``    -- the acquisition sequencer: per-point timed sequences
   (DAQ window + Hall + lock-in) and the timed loops that must not depend on
-  GUI round trips (field sweep, time trace, post-sweep Hall pass).
+  GUI round trips (field sweep, time trace).
 """
 
 from __future__ import annotations
@@ -145,13 +145,6 @@ class MokeSequencer(Device):
             ArgInfo("hall", "bool"),
             ArgInfo("lockin", "bool"),
         ], description="Points at a fixed field, paced by interval"),
-        CommandInfo("hall_pass", [
-            ArgInfo("setpoints_V", "list"),
-            ArgInfo("branch", "list"),
-            ArgInfo("settle_s", "float", "s", 0.0, 60.0),
-            ArgInfo("integration_s", "float", "s", 0.0, 0.6),
-        ], description="Apply each coil setpoint, settle, read the Hall probe (not simultaneous "
-                       "with any optical reading)"),
     ]
 
     def __init__(self, name, config=None, simulated=False):
@@ -283,11 +276,11 @@ class MokeSequencer(Device):
         if t_point_s < settle_s + acq_time_s:
             t_point_s = settle_s + acq_time_s
         n = len(setpoints)
-        t_begin = start = time.monotonic()
+        t_begin = start = time.perf_counter()
         lockin_after = "settle" if lockin else "acquisition"
         for i, v in enumerate(setpoints):
             due = start + i * t_point_s
-            wait = due - time.monotonic()
+            wait = due - time.perf_counter()
             if wait > 0:
                 self.sleep(wait, ctx)
             held, rec = self._gated_point(
@@ -295,20 +288,20 @@ class MokeSequencer(Device):
                 f"point {i + 1}/{n} ({v:+.4g} V)", auto_pause_on_error)
             start += held
             rec.update({"kind": "point", "index": i, "branch": int(branch[i]), "setpoint_V": v,
-                        "late_s": max(0.0, time.monotonic() - (start + (i + 1) * t_point_s))})
+                        "late_s": max(0.0, time.perf_counter() - (start + (i + 1) * t_point_s))})
             op.emit(rec)
             op.set_progress((i + 1) / n)
-        return {"points": n, "elapsed_s": time.monotonic() - t_begin, "paused_s": op.paused_total_s}
+        return {"points": n, "elapsed_s": time.perf_counter() - t_begin, "paused_s": op.paused_total_s}
 
     def op_time_trace(self, ctx, coil_V, n_points, interval_s, acq_time_s, hall, lockin):
         op = ctx.operation
         self.host.device(self.daq_name).check_coil(coil_V)
-        t0 = time.monotonic()
+        t0 = time.perf_counter()
         t0_wall = time.time()
         pace = t0
         for k in range(n_points):
             held, rec = self._gated_point(
-                op, lambda: (time.monotonic() - t0,
+                op, lambda: (time.perf_counter() - t0,
                              self.point(coil_V, acq_time_s, 0.0, hall, lockin, "acquisition", ctx)),
                 f"point {k + 1}/{n_points}", True)
             pace += held
@@ -317,25 +310,8 @@ class MokeSequencer(Device):
             op.emit(rec)
             op.set_progress((k + 1) / n_points)
             due = pace + (k + 1) * interval_s
-            wait = due - time.monotonic()
+            wait = due - time.perf_counter()
             if wait > 0 and k + 1 < n_points:
                 self.sleep(wait, ctx)
         return {"points": n_points, "paused_s": op.paused_total_s}
 
-    def op_hall_pass(self, ctx, setpoints_V, branch, settle_s, integration_s):
-        op = ctx.operation
-        self._require(True, False)
-        host = self.host
-        host.run(self.hall_name, lambda d: d.set_integration(integration_s), 10.0, ctx.cancel, "integration")
-        n = len(setpoints_V)
-        for i, v in enumerate(setpoints_V):
-            op.checkpoint()
-            host.run(self.daq_name, lambda d, v=v: d.static_outputs(float(v), *d.ao_V), 10.0,
-                     ctx.cancel, "set coil")
-            self.sleep(settle_s, ctx)
-            h = host.run(self.hall_name, lambda d: d.read_mT(), 10.0, ctx.cancel, "read field")
-            op.emit({"kind": "hall", "index": i, "branch": int(branch[i]), "setpoint_V": float(v),
-                     "hall_field_mT": h["field_mT"], "hall_t_end": h["t_end"],
-                     "hall_integration_s": h["integration_s"]})
-            op.set_progress((i + 1) / n)
-        return {"points": n}
