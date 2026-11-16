@@ -85,18 +85,32 @@ with a normal window close).**  Same `--read-only` service, Hall probe only.
   MiniMoke's `pythoncom.CoInitializeEx` call.  Zeroing was refused (FORBIDDEN).
 * The USB Teslameter application was left closed; reopen it if it is needed.
 
+**2026-11-16 16:16 — first real-mode start (the user, from the Samba_controls
+desktop icon).**  `machine.toml` imported from `Documents\Minimoke-bugfixed`
+(mode real).  Connection results in `service.log`: DAQ, 7270 (1 extra status
+chunk per response, as before), Hall probe and Kinesis stage **ON**, with
+their connect-time writes done without error (Hall Speed 1 and Filter from
+the default 0.5 s integration; Kinesis backlash 0.02 mm).  Polar stage
+DEVICE_UNAVAILABLE: its TMCM-3212 was not on USB (Windows listed its earlier
+COM5/COM8/COM13 entries as not present).  After the user plugged it in it
+appeared on COM13 (found by pytrinamic's port enumeration, no port opened);
+the user pressed *Connect* at 16:29:55 and reported **stage_polar ON**
+(motor currents, speed, microsteps and StealthChop parameters written as in
+MiniMoke; nothing moved).  No measurement, coil output or stage move yet.
+
 ## Remaining hardware checks
 
 Each needs the instruments; ask the lab before anything that moves or
 energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
 
-1. **Polar stage connection:** its connect writes MiniMoke's motor-current and
-   StealthChop parameters — treat as energising; not possible read-only.
+1. **Polar stage readback:** connection done (16:29, above); compare the
+   position readback with MiniMoke's for the same offsets before any move.
    Never run it together with the USB Teslameter application holding the
    Hall probe (same for MiniMoke).
 2. **Hall probe zeroing and writes:** reads work on the worker thread without
-   COM initialisation (checked); setting Speed/Filter and zeroing (writes) are
-   still untested.  The probe was found with Filter 0 (off) — Samba_mini sets
+   COM initialisation (checked); Speed/Filter writes at connect worked in the
+   real-mode start; per-workflow integration changes and zeroing are still
+   untested.  The probe was found with Filter 0 (off) — Samba_mini sets
    the integration per workflow, MiniMoke reset it to 0.5 s at the end of runs.
 3. **DAQ timing (finding F1 fix):** with the coil connected, confirm the coil
    steps at the trigger and that the settle prefix removes the transient;
