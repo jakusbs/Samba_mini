@@ -5,8 +5,10 @@ Samba's Calibration tab holds its own plot and the stage positioning group
 (plus autofocus, which MiniMoke does not have).  The plot here is a rolling
 signal monitor so the signal stays visible while the stage is positioned: it
 shows the service's live readbacks (about once a second while no measurement
-runs) and every measured point during a run.  Stage: readback, jog with
-MiniMoke's odometer steps, go-to, STOP and "set zero here".
+runs) and every measured point during a run.  Stage: Samba's digit jog (a ▲
+and ▼ for every digit, MiniMoke's odometer steps 10 mm … 0.00001 mm), go-to,
+STOP and "set zero here".  Stage positions are in mm like MiniMoke's motor
+tabs; scan ranges in the Trajectory tab are in µm like MiniMoke's procedures.
 
 Every action goes through the device service and needs control of the setup
 (the lease); the service rejects it otherwise.  Slow calls run off the GUI
@@ -19,20 +21,16 @@ import collections
 import math
 import time
 
-from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout,
-                             QWidget)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+                             QVBoxLayout, QWidget)
 
 from core.gui.bridge import call_async, error_text
 from core.scan.channels import SENSORS
-from Samba_mini.panels.widgets import NoScrollComboBox, NoScrollDoubleSpinBox
-
-JOG_STEPS_MM = [10.0, 1.0, 0.1, 0.01, 0.001, 0.0001, 0.00001]   # MiniMoke odometer steps
+from Samba_mini.panels.widgets import NoScrollComboBox
 STAGE_TITLES = {"longitudinal": "Longitudinal stage · Thorlabs Kinesis",
                 "polar": "Polar stage · Trinamic TMCM-3212"}
 
-_AXIS = "color:#89b4fa;font-size:16px;font-weight:bold;"
-_RB = "font-family:Consolas,'Courier New';font-size:14px;color:#a6e3a1;min-width:120px;"
 
 
 MONITOR_WINDOWS = [("1 min", 60), ("5 min", 300), ("15 min", 900), ("1 h", 3600)]
@@ -143,6 +141,156 @@ class SignalMonitor(QWidget):
         self.canvas.draw_idle()
 
 
+class DigitJog(QWidget):
+    """One axis of Samba's digit jog (``core/calibration.py`` DigitJogWidget), in MiniMoke's units.
+
+    A ▲ above and a ▼ below every digit of the position: a click jogs the axis
+    by one unit of that digit, from 10 mm down to 0.00001 mm (MiniMoke's
+    odometer steps).  As in MiniMoke the digits are the live position, and a
+    click is a relative jog, so it can never send a stale absolute target; the
+    stage worker runs repeated clicks one after another.  As in Samba nothing
+    can be clicked until a position has been read.  Typing a value and pressing
+    Enter moves the axis there.
+    """
+    jog = pyqtSignal(str, float)          # axis, delta in mm
+    move = pyqtSignal(str, float)         # axis, absolute target in mm
+
+    N_INT, N_DEC = 2, 5
+
+    _BTN_UP = ("QPushButton{background:#313244;color:#89b4fa;border:1px solid #45475a;border-radius:2px;"
+               "font-size:10px;font-weight:bold;padding:0;}QPushButton:hover{background:#45475a;}"
+               "QPushButton:pressed{background:#585b70;}QPushButton:disabled{color:#45475a;}")
+    _BTN_DOWN = _BTN_UP.replace("#89b4fa", "#f38ba8")
+    _DIGIT = ("QLabel{color:#cdd6f4;font-family:'Courier New',monospace;font-size:16px;font-weight:bold;"
+              "background:#181825;border:1px solid #313244;border-radius:3px;padding:2px 2px;}")
+    _EDIT = ("QLineEdit{background:#181825;border:1px solid #45475a;border-radius:4px;color:#cdd6f4;"
+             "font-family:'Courier New',monospace;font-size:13px;font-weight:bold;padding:3px 6px;}"
+             "QLineEdit:focus{border:1px solid #89b4fa;}QLineEdit:disabled{color:#6c7086;}")
+
+    def __init__(self, axis: str, parent=None):
+        super().__init__(parent)
+        self.axis = axis
+        self._pos: float | None = None
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(2, 2, 2, 2)
+        outer.setSpacing(8)
+        name = QLabel(axis.upper())
+        name.setStyleSheet("color:#89b4fa;font-size:16px;font-weight:bold;")
+        name.setFixedWidth(16)
+        outer.addWidget(name)
+        grid = QGridLayout()
+        grid.setSpacing(1)
+        grid.setContentsMargins(0, 0, 0, 0)
+        self._sign = QLabel("?")
+        self._sign.setFixedSize(20, 26)
+        self._sign.setStyleSheet(self._DIGIT)
+        self._sign.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(self._sign, 1, 0)
+        self._digits: list[QLabel] = []
+        self._buttons: list[QPushButton] = []
+        col = 1
+        for i in range(self.N_INT + self.N_DEC):
+            if i == self.N_INT:
+                dot = QLabel(".")
+                dot.setFixedWidth(8)
+                dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                dot.setStyleSheet("color:#6c7086;font-size:16px;font-weight:bold;")
+                grid.addWidget(dot, 1, col)
+                col += 1
+            step = 10.0 ** (self.N_INT - 1 - i)
+            for row, sign, style, text in ((0, +1, self._BTN_UP, "▲"), (2, -1, self._BTN_DOWN, "▼")):
+                b = QPushButton(text)
+                b.setFixedSize(20, 15)
+                b.setStyleSheet(style)
+                b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                b.setToolTip(f"{axis.upper()} {'+' if sign > 0 else '−'}{step:g} mm")
+                b.clicked.connect(lambda _=False, d=sign * step: self._click(d))
+                grid.addWidget(b, row, col, Qt.AlignmentFlag.AlignCenter)
+                self._buttons.append(b)
+            d = QLabel("-")
+            d.setFixedSize(20, 26)
+            d.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            d.setStyleSheet(self._DIGIT)
+            grid.addWidget(d, 1, col)
+            self._digits.append(d)
+            col += 1
+        unit = QLabel("mm")
+        unit.setStyleSheet("color:#6c7086;font-size:11px;")
+        grid.addWidget(unit, 1, col)
+        outer.addLayout(grid)
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        row = QHBoxLayout()
+        lbl = QLabel("Go to:")
+        lbl.setStyleSheet("color:#6c7086;font-size:10px;")
+        self.edit = QLineEdit("")
+        self.edit.setStyleSheet(self._EDIT)
+        self.edit.setFixedWidth(100)
+        self.edit.setToolTip(f"Type a position in mm and press Enter to move {axis.upper()} there")
+        self.edit.returnPressed.connect(self._enter)
+        row.addWidget(lbl)
+        row.addWidget(self.edit)
+        row.addWidget(QLabel("mm"))
+        right.addLayout(row)
+        self.um = QLabel("")
+        self.um.setStyleSheet("color:#6c7086;font-size:10px;")
+        right.addWidget(self.um)
+        outer.addLayout(right)
+        outer.addStretch()
+        self._apply()
+
+    def _click(self, delta_mm: float) -> None:
+        if self._pos is not None:
+            self.jog.emit(self.axis, delta_mm)
+
+    def _enter(self) -> None:
+        if self._pos is None:
+            return
+        try:
+            target = float(self.edit.text().replace(",", ".").strip())
+        except ValueError:
+            return
+        self.move.emit(self.axis, target)
+
+    def set_unknown(self) -> None:
+        self._pos = None
+        self._apply()
+
+    def set_position(self, value_mm, simulated: bool = False) -> None:
+        try:
+            v = float(value_mm)
+        except (TypeError, ValueError):
+            v = math.nan
+        self._pos = v if math.isfinite(v) else None
+        color = "#fab387" if simulated else "#cdd6f4"
+        for lbl in self._digits + [self._sign]:
+            lbl.setStyleSheet(self._DIGIT.replace("#cdd6f4", color))
+        self.setToolTip("simulated position" if simulated else "")
+        self._apply()
+
+    def _apply(self) -> None:
+        known = self._pos is not None
+        for b in self._buttons:
+            b.setEnabled(known)
+        self.edit.setEnabled(known)
+        if not known:
+            self._sign.setText("?")
+            for d in self._digits:
+                d.setText("-")
+            self.um.setText("position unknown — Read all")
+            return
+        v = round(self._pos, self.N_DEC)
+        text = f"{abs(v):0{self.N_INT + self.N_DEC + 1}.{self.N_DEC}f}".replace(".", "")
+        if len(text) > self.N_INT + self.N_DEC:              # beyond ±99.99999 mm: no digit display
+            text = "~" * (self.N_INT + self.N_DEC)
+        self._sign.setText("−" if v < 0 else "+")
+        for d, ch in zip(self._digits, text):
+            d.setText(ch)
+        self.um.setText(f"= {v * 1000:+.2f} µm")
+        if not self.edit.hasFocus():
+            self.edit.setText(f"{v:.{self.N_DEC}f}")
+
+
 class CalibrationPanel(QWidget):
     message = pyqtSignal(str, str)          # level, text
 
@@ -156,73 +304,37 @@ class CalibrationPanel(QWidget):
         outer.addWidget(self.monitor, 1)
         box = QGroupBox("Stage positioning")
         self.stage_box = box
-        g = QGridLayout(box)
-        g.setHorizontalSpacing(8)
-        g.setVerticalSpacing(8)
+        v = QVBoxLayout(box)
+        v.setSpacing(4)
         self.stage_title = QLabel("")
         self.stage_title.setStyleSheet("color:#a6adc8;")
-        g.addWidget(self.stage_title, 0, 0, 1, 6)
-        hdr = ["", "Readback", "Jog", "", "Go to", ""]
-        for col, text in enumerate(hdr):
-            if text:
-                lbl = QLabel(text)
-                lbl.setStyleSheet("color:#6c7086;font-size:10px;")
-                g.addWidget(lbl, 1, col)
-        self.pos_lbl: dict[str, QLabel] = {}
-        self.goto: dict[str, NoScrollDoubleSpinBox] = {}
-        for row, ax in enumerate(("x", "y", "z"), start=2):
-            a = QLabel(ax.upper())
-            a.setStyleSheet(_AXIS)
-            g.addWidget(a, row, 0)
-            lbl = QLabel("—")
-            lbl.setStyleSheet(_RB)
-            self.pos_lbl[ax] = lbl
-            g.addWidget(lbl, row, 1)
-            minus = QPushButton("◀")
-            plus = QPushButton("▶")
-            for b, sign in ((minus, -1), (plus, +1)):
-                b.setFixedWidth(34)
-                b.setToolTip(f"Jog {ax.upper()} by {'−' if sign < 0 else '+'}step")
-                b.clicked.connect(lambda _=False, a=ax, s=sign: self._jog(a, s))
-            g.addWidget(minus, row, 2)
-            g.addWidget(plus, row, 3)
-            sp = NoScrollDoubleSpinBox()
-            sp.setDecimals(5)
-            sp.setRange(-100, 100)
-            sp.setSuffix(" mm")
-            sp.setMinimumWidth(100)
-            self.goto[ax] = sp
-            g.addWidget(sp, row, 4)
-            b_go = QPushButton("Go")
-            b_go.setFixedWidth(44)
-            b_go.clicked.connect(lambda _=False, a=ax: self._goto([a]))
-            g.addWidget(b_go, row, 5)
-        g.addWidget(QLabel("Jog step:"), 5, 0)
-        self.step = NoScrollComboBox()
-        for s in JOG_STEPS_MM:
-            self.step.addItem(f"{s:g} mm", s)
-        self.step.setCurrentIndex(3)
-        g.addWidget(self.step, 5, 1)
+        v.addWidget(self.stage_title)
+        self.jogs: dict[str, DigitJog] = {}
+        for ax in ("x", "y", "z"):
+            j = DigitJog(ax)
+            j.jog.connect(self._jog)
+            j.move.connect(lambda a, mm: self._goto({a: mm}))
+            v.addWidget(j)
+            self.jogs[ax] = j
         btns = QHBoxLayout()
         b_read = QPushButton("⟳ Read all")
         b_read.clicked.connect(self.refresh_positions)
-        b_goall = QPushButton("Go to all")
-        b_goall.clicked.connect(lambda: self._goto(["x", "y", "z"]))
         b_zero = QPushButton("Set zero here")
         b_zero.setToolTip("MiniMoke 'home': the current position becomes the software zero")
         b_zero.clicked.connect(self._set_zero)
         b_stop = QPushButton("■ STOP")
         b_stop.setObjectName("abort_btn")
         b_stop.clicked.connect(lambda: self._cmd(self._stage(), "stop", quiet=True))
-        for b in (b_read, b_goall, b_zero, b_stop):
+        for b in (b_read, b_zero, b_stop):
             btns.addWidget(b)
-        g.addLayout(btns, 6, 0, 1, 6)
-        note = QLabel("Moves need control of the setup. Positions are relative to the software zero "
-                      "(MiniMoke's offsets).")
+        v.addLayout(btns)
+        note = QLabel("▲/▼ jog by one unit of that digit (10 mm … 0.00001 mm = 10 nm). Moves need control "
+                      "of the setup. Positions are relative to the software zero (MiniMoke's offsets); "
+                      "scans use µm.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#6c7086;font-size:10px;")
-        g.addWidget(note, 7, 0, 1, 6)
-        g.setRowStretch(8, 1)
+        v.addWidget(note)
+        v.addStretch()
         right = QVBoxLayout()
         right.addWidget(box)
         right.addStretch(1)
@@ -254,8 +366,8 @@ class CalibrationPanel(QWidget):
 
     def update_setup(self) -> None:
         self.stage_title.setText(STAGE_TITLES.get(self._setup(), self._setup()))
-        for lbl in self.pos_lbl.values():
-            lbl.setText("—")
+        for j in self.jogs.values():
+            j.set_unknown()                      # the other stage's position must not be jogged from
 
     def _client(self):
         b = self._bridge()
@@ -274,15 +386,14 @@ class CalibrationPanel(QWidget):
         call_async(lambda: c.device(device).command(command, **args), ok,
                    lambda e: self.message.emit("error", f"{device}.{command}: {error_text(e)}"))
 
-    def _jog(self, axis: str, sign: int) -> None:
-        self._cmd(self._stage(), "jog", quiet=True, axis=axis, delta_mm=sign * float(self.step.currentData()))
+    def _jog(self, axis: str, delta_mm: float) -> None:
+        self._cmd(self._stage(), "jog", quiet=True, axis=axis, delta_mm=delta_mm)
 
-    def _goto(self, axes: list[str]) -> None:
+    def _goto(self, targets: dict) -> None:
         c = self._client()
         if c is None:
             return
         st = self._stage()
-        targets = {a: self.goto[a].value() for a in axes}
 
         def go():
             return {a: c.device(st).command("move_to", axis=a, position_mm=v) for a, v in targets.items()}
@@ -300,7 +411,8 @@ class CalibrationPanel(QWidget):
         if c is None or not c.session:
             return
         st = self._stage()
-        call_async(lambda: c.device(st).read("x_mm", "y_mm", "z_mm"), self._show_positions, lambda e: None)
+        call_async(lambda: c.device(st).read("x_mm", "y_mm", "z_mm"), self._show_positions,
+                   lambda e: [j.set_unknown() for j in self.jogs.values()])
 
     def _show_positions(self, readings) -> None:
         for ax in ("x", "y", "z"):
@@ -308,13 +420,6 @@ class CalibrationPanel(QWidget):
             self.set_position(ax, r.value if r is not None else None, r.quality.value if r else "")
 
     def set_position(self, axis: str, value, quality: str = "") -> None:
-        lbl = self.pos_lbl.get(axis)
-        if lbl is None:
-            return
-        if value is None or value != value:
-            lbl.setText("—")
-            return
-        lbl.setText(f"{value:+.5f} mm")
-        sim = quality == "SIMULATED"
-        lbl.setStyleSheet(_RB.replace("#a6e3a1", "#fab387") if sim else _RB)
-        lbl.setToolTip("simulated value" if sim else "")
+        j = self.jogs.get(axis)
+        if j is not None:
+            j.set_position(value, quality == "SIMULATED")
