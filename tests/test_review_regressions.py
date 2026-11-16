@@ -268,3 +268,20 @@ def test_lockin_settle_uses_applied_time_constant(admin_client, service, tmp_pat
     assert meta["field_settle_s"] == pytest.approx(1.0)
     assert used[0]["settle_s"] == pytest.approx(1.0)
     assert used[0]["t_point_s"] >= 1.0 + FAST_LOCKIN["acq_time"]
+
+
+def test_old_executor_request_does_not_use_a_reacquired_lease(admin_client, service, monkeypatch):
+    c = admin_client
+    c.acquire_lease()
+    server = service.server
+    generation = server.lease.generation()
+    request = protocol.make_request(
+        "device.write", {"device": "daq", "attr": "coil_command_V", "value": 0.7},
+        c.session, 10)
+    c.release_lease()
+    c.acquire_lease()
+    writes = []
+    monkeypatch.setattr(server.host, "write", lambda *a, **k: writes.append(a))
+    server._handle([b"old-lease-request"], protocol.dumps(request),
+                   received_at=time.monotonic(), lease_generation=generation)
+    assert writes == []

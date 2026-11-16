@@ -79,6 +79,11 @@ class LeaseManager:
             raise ServiceError(ErrorCode.LEASE_REQUIRED, "take control of the setup first",
                                self.status())
 
+    def generation(self) -> CancelToken:
+        """Snapshot at RPC receipt; this does not grant permission to mutate."""
+        with self._lock:
+            return self._cancel
+
     def request_token(self, token: str) -> CancelToken:
         """Fence queued work when this acquisition of the lease ends."""
         with self._lock:

@@ -171,9 +171,10 @@ class ServiceServer:
             self._out.put(("reply", ident, protocol.make_error(
                 None, ServiceError(ErrorCode.BAD_REQUEST, "message too large"))))
             return
-        self._pool.submit(self._handle, ident, payload, time.monotonic())
+        self._pool.submit(self._handle, ident, payload, time.monotonic(), self.lease.generation())
 
-    def _handle(self, ident, payload: bytes, received_at: float | None = None) -> None:
+    def _handle(self, ident, payload: bytes, received_at: float | None = None,
+                lease_generation: CancelToken | None = None) -> None:
         rid = None
         try:
             msg = protocol.loads(payload)
@@ -181,6 +182,7 @@ class ServiceServer:
             req = protocol.validate_request(msg)
             rid = req["id"]
             req["_deadline"] = (received_at if received_at is not None else time.monotonic()) + req["timeout_s"]
+            req["_received_lease"] = lease_generation
             result = self.dispatch(req)
             reply = protocol.make_reply(rid, result)
         except ServiceError as exc:
@@ -268,7 +270,7 @@ class ServiceServer:
             if level == "admin" and not session.is_admin:
                 raise ServiceError(ErrorCode.FORBIDDEN, "administrator role required")
             if level == "lease":
-                req["_lease_cancel"] = self.lease.request_token(req["session"])
+                req["_lease_cancel"] = self._lease_token(req)
         params = req["params"]
         mutating = method in {"device.write", "device.connect", "device.disconnect",
                               "device.reconnect", "op.start"}
@@ -280,15 +282,27 @@ class ServiceServer:
         if mutating:
             if self.read_only:
                 raise ServiceError(ErrorCode.FORBIDDEN, "read-only diagnostics mode")
-            with self._control_lock:
-                req["_lease_cancel"] = self.lease.request_token(req["session"])
-                device = _str(params, "device")
-                self._refuse_during_run(params, device, command, params.get("args"),
-                                       allow_stop=(command == "stop"))
-                req["_mutation_cancel"] = self._request_cancel(
-                    session, params, req, deadline=(method != "op.start"))
-                key = protocol.new_id()
-                self._inflight[key] = self._resources(device, command, params.get("args"))
+            device = _str(params, "device")
+            try:
+                with self._control_lock:
+                    req["_lease_cancel"] = self._lease_token(req)
+                    self._refuse_during_run(params, device, command, params.get("args"),
+                                           allow_stop=(command == "stop"))
+                    resources = self._resources(device, command, params.get("args"))
+                    if command != "stop" and any(resources & used for used in self._inflight.values()):
+                        raise ServiceError(ErrorCode.BUSY, "an instrument command is still finishing")
+                    req["_mutation_cancel"] = self._request_cancel(
+                        session, params, req, deadline=(method != "op.start"))
+                    key = protocol.new_id()
+                    self._inflight[key] = resources
+            except ServiceError as exc:
+                if method == "device.command":
+                    log.warning("refused %s.%s by %s (%s): %s", device, command,
+                                session.user["username"], session.client, exc.message)
+                elif method in {"device.connect", "device.disconnect", "device.reconnect"}:
+                    log.warning("%s %s by %s (%s) failed: %s: %s", method.split(".")[1],
+                                device, session.user["username"], session.client, exc.code, exc.message)
+                raise
             try:
                 return fn(session, params, req)
             finally:
@@ -470,12 +484,18 @@ class ServiceServer:
             if self.read_only:
                 raise ServiceError(ErrorCode.FORBIDDEN, "read-only diagnostics mode: commands that change "
                                    "the instruments are disabled")
-            r["_lease_cancel"] = self.lease.request_token(s.token)
+            r["_lease_cancel"] = self._lease_token(r)
             self._refuse_during_run(p, dev.name, name, p.get("args"), allow_stop=(name == "stop"))
         cancel = (self._request_cancel(s, p, r) if info.mutating
                   else CancelToken(deadline=r["_deadline"]))
         ctx = CallContext(cancel=cancel, host=self.host, session_user=s.user["username"])
-        return self.host.command(dev.name, name, p.get("args") or {}, ctx)
+        args = p.get("args") or {}
+        result = self.host.command(dev.name, name, args, ctx)
+        if info.mutating and dev.PHYSICAL and not self.host.locked(dev.name):
+            log.info("manual %s.%s(%s) by %s (%s)%s", dev.name, name,
+                     ", ".join(f"{k}={v}" for k, v in args.items()), s.user["username"], s.client,
+                     " during a measurement" if self.host.run_active else "")
+        return result
 
     def _resources(self, device: str, command: str | None = None, args: dict | None = None) -> set[str]:
         """Resolve logical endpoints to the instruments their mutations touch."""
@@ -500,6 +520,13 @@ class ServiceServer:
         if not self.host.run_active or run_id != self.host.run_id:
             raise ServiceError(ErrorCode.INVALID_STATE, "this run has ended or was replaced")
         return True
+
+    def _lease_token(self, req: dict) -> CancelToken:
+        current = self.lease.request_token(req["session"])
+        received = req.get("_received_lease")
+        if received is not None and received is not current:
+            raise ServiceError(ErrorCode.LEASE_REQUIRED, "the request belongs to an ended lease")
+        return current
 
     def _request_cancel(self, s, p, r, deadline: bool = True) -> CancelToken:
         if "_mutation_cancel" in r:

@@ -106,12 +106,21 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   and its position stays live while the signal is recorded; runs that move
   the stage (X/Y-sweeps, XY maps, "go to x, y first") still lock it.  Tested
   in simulation only.
+* 2026-11-16 — After the service restart (23:16:50, `e446689`) three
+  calibration scans on the real setup each reported "the stage can be moved
+  meanwhile", no move was refused, and the intensity of scan 231726 dipped
+  and settled ~4 % lower between 12 and 35 s, consistent with focusing moves.
+  Successful moves were not logged then, so manual commands on devices the run
+  does not use are now logged (`manual stage_longitudinal.jog(...) by user …
+  during a measurement`), as are refusals.  The calibration plot's time axis
+  now follows the recorded data instead of spanning the planned duration
+  (a 10 000-sample scan squeezed the first minutes into a sliver).
 
 ## Tests
 
-`scripts\run_tests.bat` → **78 passed** (≈85 s) on the measurement PC,
+`scripts\run_tests.bat` → **79 passed** (≈85 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 16, engine 13, drivers
-14, core 16, recovery 4, process 2, GUI 13.  See the README table for what each
+14, core 16, recovery 4, process 2, GUI 14.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
