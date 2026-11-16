@@ -411,8 +411,8 @@ class ControlsWindow(QMainWindow):
 
 
 def main(argv=None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    from core.gui import set_windows_app_id
+    from core.gui import install_crash_guard, set_windows_app_id
+    install_crash_guard("samba_controls")          # log file + errors shown instead of closing the window
     set_windows_app_id("ETH.Intermag.SambaControls")
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Samba_controls")

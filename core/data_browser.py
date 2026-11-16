@@ -10,7 +10,8 @@ Features:
   • Overlay multiple 1D scans for comparison
   • Handles incomplete/aborted files (from incremental saving)
 """
-import os, glob, threading
+import os, glob, threading, warnings
+import logging
 import numpy as np
 import h5py
 from datetime import datetime
@@ -62,6 +63,38 @@ _AXIS_NAMES = frozenset({"x", "y", "x_actual", "y_actual", "actuator_x",
 # ─────────────────────────────────────────────────────────────────────────────
 # Scan file reader — reads both old (end-of-scan) and new (incremental) HDF5
 # ─────────────────────────────────────────────────────────────────────────────
+log = logging.getLogger(__name__)
+
+
+def _as_axis(arr, n: int, columns: bool) -> np.ndarray:
+    """A 1-D map axis of length *n* from a set-point dataset.
+
+    Samba stores ``x_setpoint [n_x]`` and ``y_setpoint [n_y]``; Samba_mini
+    stores the set-point of every point (``[n_y, n_x]``).  Both are reduced to
+    one value per column (x) / row (y).  Rows or columns not measured yet (NaN:
+    a map still running, or aborted) get their value from the regular spacing
+    of the measured ones, so the map is drawn at the right place.
+    """
+    a = np.asarray(arr, dtype=float)
+    if a.ndim == 2:
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            a = np.nanmean(a, axis=0 if columns else 1)
+    a = np.ravel(a)
+    idx = np.arange(n, dtype=float)
+    if a.size != n:
+        return idx
+    ok = np.isfinite(a)
+    if ok.all():
+        return a
+    if ok.sum() >= 2:
+        slope, offset = np.polyfit(idx[ok], a[ok], 1)
+        return np.where(ok, a, slope * idx + offset)
+    if ok.sum() == 1:
+        return np.where(ok, a, a[ok][0] + (idx - idx[ok][0]))
+    return idx
+
+
 class ScanFile:
     """Lightweight wrapper around one HDF5 scan file."""
 
@@ -417,12 +450,17 @@ class ScanFile:
                     else:
                         y_arr = np.arange(data_arr.shape[0]); y_lbl = "Row"
 
+                if data_arr.ndim != 2:
+                    return None
+                x_arr = _as_axis(x_arr, data_arr.shape[1], columns=True)
+                y_arr = _as_axis(y_arr, data_arr.shape[0], columns=False)
                 return {
                     "data": data_arr, "x_arr": x_arr, "y_arr": y_arr,
                     "x_label": x_lbl, "y_label": y_lbl,
                     "sensor_label": slbl, "sensor_unit": sunit,
                 }
         except Exception:
+            log.exception("read_2d %s", self.path)
             return None
 
     def list_columns(self) -> List[Tuple[str, str]]:
@@ -626,7 +664,13 @@ class BrowserPlotWidget(QWidget):
                 x_label: str, y_label: str, sensor_label: str,
                 cmap: str = "RdBu_r"):
         self.clear()
-        ext = [x_arr[0], x_arr[-1], y_arr[0], y_arr[-1]]
+        x_arr = _as_axis(x_arr, data.shape[1], columns=True)
+        y_arr = _as_axis(y_arr, data.shape[0], columns=False)
+        ext = [float(x_arr[0]), float(x_arr[-1]), float(y_arr[0]), float(y_arr[-1])]
+        for i in (0, 2):                     # one column / row: give it a width
+            if ext[i] == ext[i + 1]:
+                ext[i] -= 0.5
+                ext[i + 1] += 0.5
         v   = data[np.isfinite(data)]
         vmin = v.min() if len(v) else 0
         vmax = v.max() if len(v) else 1
@@ -1174,7 +1218,24 @@ class DataBrowserPanel(QWidget):
         self._show_file(sf)
 
     # ── Selection handling ────────────────────────────────────────────────────
+    def show_error(self, text: str) -> None:
+        """A file that cannot be shown must never take the window down: say why in the plot."""
+        try:
+            self.plot.clear()
+            self.plot.ax.text(0.5, 0.5, text, ha="center", va="center", wrap=True,
+                              color="#f38ba8", fontsize=9, transform=self.plot.ax.transAxes)
+            self.plot.canvas.draw_idle()
+        except Exception:  # noqa: BLE001
+            log.exception("data browser: could not show the error")
+
     def _on_selection(self):
+        try:
+            self._on_selection_unguarded()
+        except Exception as exc:  # noqa: BLE001 - one bad file must not close Samba_mini
+            log.exception("data browser: cannot show the selected file")
+            self.show_error(f"Cannot show this file:\n{type(exc).__name__}: {exc}")
+
+    def _on_selection_unguarded(self):
         items = self.tree.selectedItems()
         # Show metadata for the last selected file.  The full ScanFile is read
         # here, on demand, for the one file being looked at — the tree itself
@@ -1383,10 +1444,14 @@ class DataBrowserPanel(QWidget):
                 self.y_combo.setCurrentIndex(i); break
 
         # 2D-map mode is available only for non-DC scans with a real Y axis.
+        # It is the default view only for spatial maps: in Samba_mini a field
+        # sweep's second axis is the sweep number and a line scan's is the ±B
+        # repeat, which read best as curves.
         is_2d = (not is_dc) and m["n_y"] > 1
+        is_map = is_2d and "XY" in str(m.get("scan_type", "")).upper()
         self.map2d_cb.blockSignals(True)
         self.map2d_cb.setEnabled(is_2d)
-        self.map2d_cb.setChecked(is_2d)   # default to the map for 2D scans
+        self.map2d_cb.setChecked(is_map)
         self.map2d_cb.blockSignals(False)
         self._populating_combos = False
 
@@ -1455,6 +1520,13 @@ class DataBrowserPanel(QWidget):
         return True
 
     def _plot_current(self):
+        try:
+            self._plot_current_unguarded()
+        except Exception as exc:  # noqa: BLE001 - a plot error must not close Samba_mini
+            log.exception("data browser: cannot plot")
+            self.show_error(f"Cannot plot this selection:\n{type(exc).__name__}: {exc}")
+
+    def _plot_current_unguarded(self):
         """Plot with the user's column selection — a 2D colour map when the
         2D-map toggle is on, otherwise a 1D line plot."""
         # Find the last selected file
@@ -1489,13 +1561,13 @@ class DataBrowserPanel(QWidget):
                                   result["x_label"], result["y_label"],
                                   result["sensor_label"],
                                   cmap=self.cmap_combo.currentText())
-            else:
-                self.meta_text.append("\n⚠ Could not read a 2D map for the selected channel.")
-            return
+                return
+            # No map for this channel (e.g. an averaged loop): draw it as a curve
+            # below rather than leaving the previous file's plot on screen.
 
         # ── 1D line plot ──────────────────────────────────────────────────────
         if not y_key or (not x_key and not is_dc):
-            self.meta_text.append("\n⚠ Select X and Y columns above, then click Plot.")
+            self.show_error("Select X and Y columns above, then click Plot.")
             return
         if is_dc:
             # DC plots vs. Field by default; honour Index mode if chosen.
@@ -1507,7 +1579,8 @@ class DataBrowserPanel(QWidget):
             self._kerr_convert_1d([(sf, result)])
             self.plot.plot_1d([result], title=sf.meta["scan_name"])
         else:
-            self.meta_text.append("\n⚠ Could not read selected columns from file.")
+            # Never leave the previous file's plot on screen under this file's name.
+            self.show_error("Nothing to plot for this X / Y selection\n(no finite data in these columns yet).")
 
     def _overlay_selected(self):
         """Overlay all selected scan files on one 1D plot."""

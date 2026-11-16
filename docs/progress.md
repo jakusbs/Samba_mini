@@ -62,11 +62,25 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   MiniMoke configuration (2184533 /mm Kinesis, 51200 /mm Trinamic, Y/Z of the
   polar stage inverted) — identical.
 
+* 2026-11-16 — **Crash fix.**  Opening the Data Browser during an XY map
+  closed Samba_mini (19:25, real XY map `192009_SPATIAL_XY_...h5` stopped at
+  380/8405 points and stays marked "running").  Cause: Samba_mini stores the
+  map set-points per point (`[n_y, n_x]`), Samba's reader expects 1-D axes;
+  matplotlib raised, and PyQt6 aborts the whole application on any exception
+  escaping a slot — taking the measurement (run inside the window) with it.
+  Fixes: the reader turns per-point set-points into axes (also for partly
+  measured maps); the browser shows a message instead of failing and never
+  leaves the previous file's plot under a new file name; field sweeps open as
+  curves, only spatial maps open as maps; both windows log to
+  `%LOCALAPPDATA%\\SambaMini\\logs\\samba_mini.log` / `samba_controls.log` and
+  show unexpected errors in a message instead of closing.  The HDF5 files
+  themselves were fine (all of today's files read back intact).
+
 ## Tests
 
-`scripts\run_tests.bat` → **70 passed** (≈70 s) on the measurement PC,
+`scripts\run_tests.bat` → **73 passed** (≈75 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 15, engine 13, drivers
-12, core 16, recovery 4, process 2, GUI 8.  See the README table for what each
+12, core 16, recovery 4, process 2, GUI 11.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
