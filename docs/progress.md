@@ -54,11 +54,19 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   simulation (always the real instruments; simulation stays available from
   the command line for development and tests); `docs/adding-a-device.md`.
 
+* 2026-11-16 — Stage positioning uses Samba's digit jog: a ▲ and ▼ for every
+  digit, MiniMoke's odometer steps 10 mm … 0.00001 mm, relative jogs (as
+  MiniMoke), Enter in "Go to" for an absolute move, disabled until the
+  position is read.  Units checked against MiniMoke's source: scan ranges in
+  µm (procedures), stage in mm (motor tabs), steps = mm × mm2steps from the
+  MiniMoke configuration (2184533 /mm Kinesis, 51200 /mm Trinamic, Y/Z of the
+  polar stage inverted) — identical.
+
 ## Tests
 
-`scripts\run_tests.bat` → **69 passed** (≈70 s) on the measurement PC,
+`scripts\run_tests.bat` → **70 passed** (≈70 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 15, engine 13, drivers
-12, core 16, recovery 4, process 2, GUI 7.  See the README table for what each
+12, core 16, recovery 4, process 2, GUI 8.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,

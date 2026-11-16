@@ -300,3 +300,33 @@ def test_bd_calibration_per_setup_reaches_runs(qapp, service, tmp_path, monkeypa
     w.trajectory.meta.meta_sample.editingFinished.emit()
     assert w.bd_panel.get_calibration() == [0.0] * 6 and w.bottom_tabs.currentWidget() is w.bd_panel
     w.close()
+
+
+def test_digit_jog_moves_by_the_clicked_digit(qapp, service):
+    """Samba's per-digit jog: ▲/▼ of a digit jogs by that digit's unit (mm, MiniMoke's steps)."""
+    from core.gui.bridge import ServiceBridge
+    from Samba_mini.app import MainWindow
+
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    bridge.client.acquire_lease()
+    jx = w.calibration.jogs["x"]
+    assert wait_until(qapp, lambda: jx._pos is not None, 20)       # read after login
+    start = jx._pos
+    assert [d.text() for d in jx._digits] == list(f"{abs(round(start, 5)):08.5f}".replace(".", ""))
+    jx._buttons[2 * 1].click()                                       # ▲ of the 1 mm digit
+    assert wait_until(qapp, lambda: abs(jx._pos - (start + 1.0)) < 1e-4, 30)
+    jx._buttons[2 * 4 + 1].click()                                   # ▼ of the 0.001 mm digit
+    assert wait_until(qapp, lambda: abs(jx._pos - (start + 0.999)) < 1e-4, 30)
+    jx.edit.setText("0.25")
+    jx.edit.returnPressed.emit()                                     # typed absolute target
+    assert wait_until(qapp, lambda: abs(jx._pos - 0.25) < 1e-4, 30)
+    assert jx.um.text() == "= +250.00 µm"
+    w.set_setup("polar")                    # the other stage: no jogging until its position is read
+    assert not any(b.isEnabled() for b in w.calibration.jogs["x"]._buttons)
+    assert wait_until(qapp, lambda: w.calibration.jogs["x"]._pos is not None, 20)
+    w.close()
