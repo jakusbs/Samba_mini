@@ -100,7 +100,7 @@ def _controls_without_service(monkeypatch):
     return w, started
 
 
-def test_controls_offers_minimoke_import_for_real_without_config(qapp, samba_home, tmp_path, monkeypatch):
+def test_controls_starts_only_real_and_offers_import_without_config(qapp, samba_home, tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 
     from core.config import machine
@@ -113,7 +113,7 @@ def test_controls_offers_minimoke_import_for_real_without_config(qapp, samba_hom
     monkeypatch.setattr(admin_panel, "choose_minimoke_folder", lambda parent: str(src))
 
     w, started = _controls_without_service(monkeypatch)
-    w.mode_combo.setCurrentText("real")
+    assert not hasattr(w, "mode_combo")                          # no simulation choice in the window
     # declined: nothing written, service not started
     answers[:] = [QMessageBox.StandardButton.Cancel]
     w.start_service()
@@ -130,14 +130,13 @@ def test_controls_offers_minimoke_import_for_real_without_config(qapp, samba_hom
     answers[:] = []
     w.start_service()
     assert started == ["real", "real"]
-    # simulation / mode from configuration never ask
-    w2, started2 = _controls_without_service(monkeypatch)
-    from core import paths
-    paths.machine_config_path().unlink()
-    w2.start_service()
-    assert started2 == [None]
-    for win in (w, w2):
-        win.bridge.close()
+    # the window never starts a simulation, whatever the configuration file says
+    data = machine.load().data
+    data["backend"]["mode"] = "simulation"
+    machine.save(data)
+    w.start_service()
+    assert started == ["real", "real", "real"]
+    w.bridge.close()
 
 
 def test_samba_mini_xy_map_ui(qapp, service, tmp_path):

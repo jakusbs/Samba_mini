@@ -47,6 +47,13 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   (`/data/calibration` in every new file).  MiniMoke workflows, engine and
   file layout unchanged.
 
+* 2026-11-16 — Calibration tab shows a live signal plot (two channels, rolling
+  window, readbacks while idle and every measured point during runs) next to
+  the stage positioning; spinbox arrows removed (both windows); clearer
+  Interval / Repeats explanations; the Samba_controls window no longer offers
+  simulation (always the real instruments; simulation stays available from
+  the command line for development and tests); `docs/adding-a-device.md`.
+
 ## Tests
 
 `scripts\run_tests.bat` → **69 passed** (≈70 s) on the measurement PC,

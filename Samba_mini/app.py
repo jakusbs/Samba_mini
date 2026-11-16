@@ -158,6 +158,8 @@ class MainWindow(QMainWindow):
         right_scroll.setWidget(self.right)
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setMinimumWidth(self.right.minimumSizeHint().width() + 18)   # rows never clipped
         self.h_split.addWidget(right_scroll)
         self.h_split.setSizes([215, 760, 360])
         self.v_split.addWidget(self.h_split)
@@ -513,6 +515,7 @@ class MainWindow(QMainWindow):
             hw.set_readout(dev, attr, body.get("value"), q)
             if dev == "hall" and attr == "field_mT":
                 self.trajectory.add_field_reading(body.get("value"))
+            self.calibration.add_readback(dev, attr, body.get("value"))
             if dev == f"stage_{self.setup}" and attr in ("x_mm", "y_mm", "z_mm"):
                 self.calibration.set_position(attr[0], body.get("value"), q)
             if dev == "lockin" and attr == "xy" and isinstance(body.get("value"), dict):
@@ -828,7 +831,7 @@ class MainWindow(QMainWindow):
         for b in self.setup_btns.values():
             b.setEnabled(not running)
         self.login_btn.setEnabled(not running)
-        self.calibration.setEnabled(not running)
+        self.calibration.set_stage_enabled(not running)
         if not running:
             self.pause_btn.setText(" Pause")
 
@@ -1037,6 +1040,7 @@ class MainWindow(QMainWindow):
             shown = self.right.map_combo.currentData() or "dc_signal"
             self.map2d.update_point(ev["ix"], ev["iy"], vals.get(shown, math.nan))
         rec = ev.get("record", {})
+        self.calibration.add_record(rec)
         if self._sl is not None:
             h = rec.get("hall_field_mT")
             if isinstance(h, (int, float)):

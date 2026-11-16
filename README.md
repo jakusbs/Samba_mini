@@ -44,23 +44,24 @@ Not yet validated on the real instruments** — see
    install.bat
    ```
 
-2. Start **Samba_controls** (desktop icon) — it starts the device service.
-   With no configuration it runs in **simulation** mode.  The first start asks
-   you to create the administrator account.  To use the instruments, choose
-   *real* next to *Start service*: with no configuration yet, Samba_controls
-   offers to import the instrument settings from MiniMoke first.
+2. Start **Samba_controls** (desktop icon) — it starts the device service on
+   the real instruments.  The first start asks you to create the administrator
+   account and, while this PC has no machine configuration, offers to import
+   the instrument settings from MiniMoke.  (Simulated instruments are for
+   development only, from the command line:
+   `scripts\service_console.bat --mode simulation`.)
 
 3. Start **Samba_mini** (desktop icon), log in, pick a measurement in the
    *Trajectory* tab and press Start.
 
 Without shortcuts: `scripts\Samba_controls.bat`, `scripts\Samba_mini.bat`.
 
-To drive the real setup, import the MiniMoke settings: offered automatically
-when you start the service in *real* mode with no configuration yet, or later
-by an administrator in Samba_controls → *Machine configuration* → *Import
-MiniMoke settings…* (choose mode *real*, then restart the service).  Close
-MiniMoke and the Thorlabs Kinesis GUI first: only one program can own the DAQ, the 7270's single Ethernet slot and the
-stage controllers.  Details, vendor prerequisites, troubleshooting and
+The MiniMoke import is offered automatically while there is no configuration,
+or later by an administrator in Samba_controls → *Machine configuration* →
+*Import MiniMoke settings…* (then restart the service).  Close MiniMoke and
+the Thorlabs Kinesis GUI first: only one program can own the DAQ, the 7270's
+single Ethernet slot and the stage controllers.  How Samba_controls works and
+how to add an instrument: [docs/adding-a-device.md](docs/adding-a-device.md).  Details, vendor prerequisites, troubleshooting and
 recovery: [docs/installation.md](docs/installation.md).
 
 ## Checks that passed

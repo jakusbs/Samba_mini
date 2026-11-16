@@ -323,11 +323,19 @@ class TimingGroup(QGroupBox):
             "repeat_num": _ispin(1, 1000, 90),
             "record_hall": QCheckBox("Record Hall"),
         }
-        tips = {"acq_time": "Acquisition time per point (DAQ window; Hall integration = min(t, 0.54 s))",
-                "settle_time": "Settle time after each stage move",
-                "field_settle_s": "Hardware-timed wait after the coil command changes",
-                "interval": "Time scan: sampling interval",
-                "repeat_num": "Spatial scans: number of repeats (each repeat measures +b then −b for line scans)",
+        tips = {"acq_time": "Int: how long each point is averaged (DAQ window at 50 kHz; the Hall probe "
+                            "integrates min(Int, 0.54 s))",
+                "settle_time": "Spatial scans: wait after each stage move before measuring",
+                "field_settle_s": "Spatial scans: wait after the coil command changes (+B → −B)",
+                "interval": "Time scan only: time from the start of one sample to the start of the next.\n"
+                            "Samples N × interval = duration (MiniMoke's 'Sampling interval').\n"
+                            "Each sample is averaged for Int; if Int is longer than the interval, the samples\n"
+                            "simply follow one another.",
+                "repeat_num": "Spatial scans only (MiniMoke's 'Repeat number'):\n"
+                              "X- / Y-sweep: each repeat measures the whole line at +B, then again at −B\n"
+                              "(B = coil command), so N repeats = 2·N passes over the line.\n"
+                              "XY map: the whole map is measured N times at +B; repeats 2… are stored in\n"
+                              "their own data groups.",
                 "record_hall": "Read the Hall probe at every point (MiniMoke always did)"}
         rows = [("Int (s):", "acq_time"), ("Settle (s):", "settle_time"), ("B settle (s):", "field_settle_s"),
                 ("Interval (s):", "interval"), ("Repeats:", "repeat_num")]

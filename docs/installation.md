@@ -62,10 +62,11 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
 
 1. `scripts\Samba_controls.bat` starts the service and asks to create the
    **first administrator** (only possible while no account exists).
-2. Without `machine.toml` the service runs in **simulation** mode: every
-   reading is labelled SIMULATED and file names end in `_SIM`.  Choosing
-   *real* next to *Start service* while there is no `machine.toml` offers the
-   MiniMoke import (section 3) instead of starting with guessed addresses.
+2. Samba_controls always starts the service on the real instruments.  While
+   there is no `machine.toml` it offers the MiniMoke import (section 3)
+   instead of starting with guessed addresses.  Simulated instruments are for
+   development only: `scripts\service_console.bat --mode simulation` (every
+   reading is then labelled SIMULATED and file names end in `_SIM`).
 3. Add operators in Samba_controls → *Users*.
 4. `scripts\Samba_mini.bat` — log in; set your data folder and defaults in
    the *Profile* tab.
@@ -73,8 +74,8 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
 ## 3. Switching to the real setup
 
 1. Close MiniMoke, Kinesis and TMCL-IDE.
-2. First time (no `machine.toml` yet): choose *real* next to *Start service*
-   and press it.  Samba_controls offers *Import from MiniMoke…*, lists the
+2. First time (no `machine.toml` yet): press *Start service*.  Samba_controls
+   offers *Import from MiniMoke…*, lists the
    MiniMoke folders it finds in Documents and on the Desktop (most recently
    used first), shows the values and writes them with mode *real*, then starts
    the service.  Like creating the first administrator, this bootstrap step
@@ -82,7 +83,8 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
    procedure presets are saved for whoever logs in next in that window.
    Later changes: Samba_controls → *Machine configuration* → *Import MiniMoke
    settings…* (administrator).  Choose the MiniMoke folder in use (e.g.
-   `Documents\Minimoke-bugfixed`) and *Mode after import: real*.  The import
+   `Documents\Minimoke-bugfixed`); the configuration is set to the real
+   instruments.  The import
    reads `configs\*.ini` and the DLL location; it never writes there.  It
    writes `%LOCALAPPDATA%\SambaMini\config\machine.toml` (a backup of any
    previous file goes to `config\backups`), `state\stage_offsets.json`, and

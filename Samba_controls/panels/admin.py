@@ -6,7 +6,7 @@ import json
 import os
 
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+from PyQt6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView,
                              QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
                              QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
@@ -201,13 +201,9 @@ class ConfigPanel(QWidget):
         b_open.clicked.connect(lambda: os.startfile(str(paths.config_dir())) if hasattr(os, "startfile") else None)
         b_imp = QPushButton("Import MiniMoke settings…")
         b_imp.clicked.connect(self._import)
-        self.mode = QComboBox()
-        self.mode.addItems(["keep mode", "real", "simulation"])
         row.addWidget(b_ref)
         row.addWidget(b_open)
         row.addWidget(b_imp)
-        row.addWidget(QLabel("Mode after import:"))
-        row.addWidget(self.mode)
         row.addStretch(1)
         lay.addLayout(row)
         note = QLabel("Machine wiring, addresses, limits and calibration are shared by everyone on this PC. "
@@ -243,8 +239,7 @@ class ConfigPanel(QWidget):
         src = choose_minimoke_folder(self)
         if not src:
             return
-        mode = None if self.mode.currentIndex() == 0 else self.mode.currentText()
-        res = confirm_and_apply(self, src, mode)
+        res = confirm_and_apply(self, src, "real")
         if res is None:
             return
         for problem in save_minimoke_presets(b.client, res["presets"]):

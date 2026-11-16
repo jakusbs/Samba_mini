@@ -132,6 +132,6 @@ Write-Host "=========================================" -ForegroundColor Green
 Write-Host "  Installation complete" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Green
 Write-Host "  Start 'Samba_controls' first (it starts the device service), then 'Samba_mini'."
-Write-Host "  Without a machine configuration the service runs in SIMULATION mode."
+Write-Host "  First start without a machine configuration: it offers to import MiniMoke's settings."
 Write-Host "  Configuration, accounts and logs: $env:LOCALAPPDATA\SambaMini"
 Write-Host "  Remove shortcuts again:  install.bat -Uninstall"
