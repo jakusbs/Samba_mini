@@ -433,9 +433,22 @@ class ServiceServer:
                                    "the instruments are disabled")
             self.lease.require(s.token)
             if dev.name != "moke":
-                self._refuse_during_run(dev.name, allow_stop=(name == "stop"))
+                try:
+                    self._refuse_during_run(dev.name, allow_stop=(name == "stop"))
+                except ServiceError:
+                    log.warning("refused %s.%s by %s (%s): the running measurement uses %s",
+                                dev.name, name, s.user["username"], s.client, dev.name)
+                    raise
         ctx = CallContext(host=self.host, session_user=s.user["username"])
-        return self.host.command(dev.name, name, p.get("args") or {}, ctx)
+        args = p.get("args") or {}
+        result = self.host.command(dev.name, name, args, ctx)
+        if info.mutating and dev.PHYSICAL and not self.host.locked(dev.name):
+            # Manual actions (jog, move, set, zero ...) leave a trace; a run's own steps on its
+            # devices are not logged (they are in the data file).
+            log.info("manual %s.%s(%s) by %s (%s)%s", dev.name, name,
+                     ", ".join(f"{k}={v}" for k, v in args.items()), s.user["username"], s.client,
+                     " during a measurement" if self.host.run_active else "")
+        return result
 
     def _refuse_during_run(self, device: str | None, allow_stop: bool = False) -> None:
         """While an operation runs, refuse commands to the devices it uses.  A device the active

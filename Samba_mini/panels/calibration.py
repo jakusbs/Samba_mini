@@ -112,6 +112,7 @@ class ScanPlot(QWidget):
         if not (self._dirty or force) or not self.isVisible():
             return
         self._dirty = False
+        t_max = 0.0
         for combo, line, ax, color in ((self.y1, self.l1, self.ax, "#89b4fa"),
                                        (self.y2, self.l2, self.ax2, "#f38ba8")):
             name = combo.currentData()
@@ -123,8 +124,14 @@ class ScanPlot(QWidget):
                 lo, hi = min(q[1] for q in pts), max(q[1] for q in pts)
                 pad = (hi - lo) * 0.08 or max(abs(hi) * 0.05, 1e-12)
                 ax.set_ylim(lo - pad, hi + pad)
-        self.ax.set_xlim(0, max(self._span, 1e-3))
+                t_max = max(t_max, pts[-1][0])
+        # The time axis follows the recorded data (it grows during the scan), not the planned
+        # duration: a long scan would otherwise squeeze the first minutes into a sliver.
+        self.ax.set_xlim(0, t_max * 1.03 if t_max > 0 else 1.0)
         self.canvas.draw_idle()
+
+    def x_limits(self) -> tuple[float, float]:
+        return tuple(self.ax.get_xlim())
 
 
 class TimeScanBox(QGroupBox):
