@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from core.model import ArgInfo, AttributeInfo, CommandInfo
+from core.paths import has_download_mark
 from core.protocol import ErrorCode, ServiceError
 from Samba_controls.service.devices.base import CallContext, Device
 
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 SPEED_TO_RATE = {15: 4.17, 14: 6.25, 13: 8.33, 12: 10, 11: 12.5, 10: 16.7, 9: 16.7, 8: 19.6,
                  7: 33.2, 6: 39, 5: 50, 4: 62, 3: 123, 2: 242, 1: 470}
 MAX_FILTER = 255
+
 
 
 class HallBase(Device):
@@ -123,6 +125,15 @@ class MagnetPhysikHall(HallBase):
             raise ServiceError(ErrorCode.NOT_SUPPORTED,
                                f"MagnetPhysik.Usb.dll not found at {self.dll_path!r}; set "
                                "[hall] dll_path in the machine configuration")
+        if has_download_mark(self.dll_path):
+            # .NET Framework refuses to load such files ("network location",
+            # HRESULT 0x80131515).  This is why MiniMoke hard-coded the copy in
+            # Documents\minimoke\libs.  We do not unblock files ourselves.
+            raise ServiceError(ErrorCode.NOT_SUPPORTED,
+                               f"{self.dll_path} is marked as downloaded from the internet (Zone.Identifier), "
+                               "so .NET will not load it. Point [hall] dll_path to an unmarked copy (MiniMoke's "
+                               "Documents\\minimoke\\libs) or, after checking its origin, unblock it "
+                               "(file Properties > Unblock, or Unblock-File).")
         try:
             import clr  # pythonnet
         except ImportError as exc:

@@ -474,3 +474,19 @@ def test_read_only_connect_writes_nothing(fake_pylablib, fake_trinamic, tmp_path
     assert h.integration_s == pytest.approx(128 / 470)
     with pytest.raises(ServiceError):
         h.set_integration(0.1)
+
+
+def test_hall_refuses_dll_with_download_mark(tmp_path, monkeypatch):
+    dll = tmp_path / "MagnetPhysik.Usb.dll"
+    dll.write_bytes(b"fake")
+    with open(f"{dll}:Zone.Identifier", "w") as f:          # NTFS alternate data stream
+        f.write("[ZoneTransfer]\nZoneId=3\n")
+    clr = types.ModuleType("clr")
+    clr.AddReference = lambda p: (_ for _ in ()).throw(AssertionError("must not try to load"))
+    monkeypatch.setitem(sys.modules, "clr", clr)
+    from Samba_controls.service.devices.hall import MagnetPhysikHall
+    h = MagnetPhysikHall("hall", {"dll_path": str(dll)})
+    with pytest.raises(ServiceError) as e:
+        h.connect()
+    assert "marked as downloaded" in e.value.message
+    assert h.state.value == "DISABLED"

@@ -67,3 +67,16 @@ def default_measurement_dir() -> Path:
 def _ensure(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def has_download_mark(path) -> bool:
+    """True if the file carries Windows' "Mark of the Web" (a Zone.Identifier
+    stream added to downloaded files).  .NET Framework refuses to load such
+    assemblies (HRESULT 0x80131515)."""
+    if os.name != "nt":
+        return False
+    try:
+        with open(f"{path}:Zone.Identifier", "rb"):
+            return True
+    except OSError:
+        return False
