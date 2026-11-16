@@ -66,7 +66,7 @@ recovery: [docs/installation.md](docs/installation.md).
 
 ## Checks that passed
 
-Automated (`scripts\run_tests.bat`, 70 tests, ~70 s, no hardware touched):
+Automated (`scripts\run_tests.bat`, 73 tests, ~75 s, no hardware touched):
 
 | Area | What is verified |
 |---|---|
@@ -75,7 +75,7 @@ Automated (`scripts\run_tests.bat`, 70 tests, ~70 s, no hardware touched):
 | Drivers (12) | real driver classes against fake `nidaqmx`/`pyvisa`/`pylablib`/`pytrinamic`/`clr`: channel order, PFI0 trigger, settle-sample discard, stale-acquisition rejection, 7270 socket framing, set acknowledgements, range rounding, reconnect, port 50001 fallback, stage conversions and signs, motor parameters, bounded waits, Hall filter and bounded zeroing, no connect-time writes in read-only mode, downloaded (Mark-of-the-Web) DLL refused with a clear message |
 | Core (16) | Samba's λ/2 staircase fit reads Samba_mini time scans; protocol safety (NaN/arrays, no object dtypes, version check, no arbitrary methods), late writes after timeout/abort never reach the driver, config migration with backup and malformed-file preservation, MiniMoke import leaves MiniMoke untouched and finds MiniMoke folders newest first, Argon2id hashes and profile persistence, logout/manual control blocked during a run, coordinated readbacks, crash-interrupted HDF5 file readable and marked partial, disk-error auto-pause without data loss, GUI processes never load drivers/PyQt5, core and service are Qt-free |
 | Recovery (4) | driver hang → bounded timeout → auto-pause → retry; device reconnect mid-run; service lost mid-run → `interrupted`; preferences/presets survive a service restart |
-| Process / GUI (10) | service as a real process: start, duplicate instance refused, clean token shutdown; example config valid; both windows run a measurement offscreen and the GUI event loop stays responsive (< 0.5 s gaps); Samba_controls starts only the real instruments and offers the MiniMoke import without a configuration (declined: nothing started); the digit jog moves the stage by the clicked digit and stays disabled until a position is read; every MiniMoke workflow round-trips through Samba's Spatial/Field layout with its parameters unchanged, settings kept per measurement; sensor checkboxes only plot; a scanlist of N scans with ABBA field flip writes Samba's `.txt`; the BD calibration is kept per setup and reaches `/data/calibration` |
+| Process / GUI (13) | service as a real process: start, duplicate instance refused, clean token shutdown; example config valid; the Data Browser opens an XY map while it is being measured without closing the window (regression of a real crash), map axes from partly measured set-point grids; an error escaping a button or file handler is logged and shown instead of closing the window; both windows run a measurement offscreen and the GUI event loop stays responsive (< 0.5 s gaps); Samba_controls starts only the real instruments and offers the MiniMoke import without a configuration (declined: nothing started); the digit jog moves the stage by the clicked digit and stays disabled until a position is read; every MiniMoke workflow round-trips through Samba's Spatial/Field layout with its parameters unchanged, settings kept per measurement; sensor checkboxes only plot; a scanlist of N scans with ABBA field flip writes Samba's `.txt`; the BD calibration is kept per setup and reaches `/data/calibration` |
 
 Manual (2026-11-16, simulation): both windows rendered and inspected
 (layout, theme, live 1D/2D plots, data browser, device panels); Samba_mini

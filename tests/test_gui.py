@@ -1,6 +1,8 @@
 """GUI smoke tests (offscreen): windows build, log in, run through the UI."""
 
 import json
+
+import numpy as np
 import os
 import time
 
@@ -330,3 +332,92 @@ def test_digit_jog_moves_by_the_clicked_digit(qapp, service):
     assert not any(b.isEnabled() for b in w.calibration.jogs["x"]._buttons)
     assert wait_until(qapp, lambda: w.calibration.jogs["x"]._pos is not None, 20)
     w.close()
+
+
+def test_data_browser_opens_a_running_xy_map_without_crashing(qapp, service, tmp_path):
+    """Regression (2026-11-16): opening the Data Browser during an XY map closed Samba_mini
+    (the map axes are stored per point; matplotlib got a 3-D extent and PyQt aborted)."""
+    import numpy as np
+
+    from core.gui.bridge import ServiceBridge
+    from Samba_mini.app import MainWindow
+
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    w.dir_edit.setText(str(tmp_path / "data"))
+    w.trajectory.set_workflow("xy_sweep")
+    w.trajectory.set_params("xy_sweep", {"x_min": -20, "x_max": 20, "x_step": 10, "y_min": 0, "y_max": 30,
+                                         "y_step": 10, "acq_time": 0.02, "time_const": 0.1, "repeat_num": 1})
+    w.start_run()
+    assert wait_until(qapp, lambda: w._progress[0] >= 3, 60)
+    w.bottom_tabs.setCurrentWidget(w.browser)           # what the user did, mid-measurement
+    w.browser.refresh()
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QTreeWidgetItemIterator
+    it = QTreeWidgetItemIterator(w.browser.tree)
+    running = None
+    while it.value():
+        fp = it.value().data(0, Qt.ItemDataRole.UserRole)
+        if fp and str(fp) == str(w.engine.path):
+            running = it.value()
+        it += 1
+    assert running is not None
+    w.browser.tree.setCurrentItem(running)              # selecting the file being written
+    for _ in range(5):
+        qapp.processEvents()
+    assert w.engine.result is None or w.engine.result["status"] == "completed"   # the run goes on
+    assert wait_until(qapp, lambda: w.engine.result is not None, 120)
+    assert w.engine.result["status"] == "completed"
+    w.browser.refresh()
+    path = w.engine.result["path"]
+    sf = w.browser._get_scanfile(path)
+    res = sf.read_2d("dc_signal")
+    assert np.allclose(res["x_arr"], [-20, -10, 0, 10, 20]) and np.allclose(res["y_arr"], [0, 10, 20, 30])
+    w.browser.plot.plot_2d(res["data"], res["x_arr"], res["y_arr"], "X", "Y", "DC")
+    w.close()
+
+
+def test_map_axes_from_partly_measured_setpoint_grid():
+    from core.data_browser import _as_axis
+    grid = np.full((4, 5), np.nan)
+    grid[:, :2] = [[-20, -10]] * 4                       # only two columns measured so far
+    assert np.allclose(_as_axis(grid, 5, columns=True), [-20, -10, 0, 10, 20])
+    ys = np.full((4, 5), np.nan)
+    ys[:2, 0] = [0, 10]
+    assert np.allclose(_as_axis(ys, 4, columns=False), [0, 10, 20, 30])
+    assert np.allclose(_as_axis(np.array([1.0, 2.0, 3.0]), 3, columns=True), [1, 2, 3])   # Samba's 1-D axes
+    assert np.allclose(_as_axis(np.full((2, 3), np.nan), 3, columns=True), [0, 1, 2])    # nothing yet
+
+
+def test_crash_guard_keeps_the_window_open(qapp, tmp_path, monkeypatch):
+    """An exception escaping a Qt slot is logged and shown instead of aborting the application."""
+    import sys
+
+    from PyQt6.QtCore import QTimer
+
+    import core.gui as gui
+    monkeypatch.setenv("SAMBA_MINI_HOME", str(tmp_path / "home"))
+    old_hook = sys.excepthook
+    try:
+        path = gui.install_crash_guard("guard_test")
+        QTimer.singleShot(0, lambda: 1 / 0)
+        for _ in range(20):
+            qapp.processEvents()
+        for h in __import__("logging").getLogger().handlers:
+            h.flush()
+        assert "ZeroDivisionError" in path.read_text(encoding="utf-8")
+        assert gui._box_open
+    finally:
+        sys.excepthook = old_hook
+        box = getattr(gui.handle_exception, "_box", None)
+        if box is not None:
+            box.close()
+        root = __import__("logging").getLogger()
+        for h in list(root.handlers):
+            if getattr(h, "_samba_file", False):
+                root.removeHandler(h)
+                h.close()
