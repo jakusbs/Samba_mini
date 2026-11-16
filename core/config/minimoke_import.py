@@ -161,6 +161,33 @@ def read_minimoke(src: Path | str) -> dict:
     return {"machine": out_machine, "offsets": offsets, "presets": presets, "notes": notes}
 
 
+def find_installations(roots=None) -> list[tuple[Path, float]]:
+    """MiniMoke folders (``<dir>/configs/*.ini``) in or directly below Documents and Desktop.
+
+    Returns ``(folder, newest settings-file mtime)``, most recently used first
+    (MiniMoke rewrites ``procedures_config.ini`` whenever it remembers the last
+    settings).  Only lists and stats files.
+    """
+    if roots is None:
+        home = Path(os.path.expanduser("~"))
+        roots = [home / "Documents", home / "Desktop"]
+    found: dict[Path, float] = {}
+    for root in roots:
+        root = Path(root)
+        try:
+            candidates = [root] + [p for p in root.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for d in candidates:
+            try:
+                inis = list((d / "configs").glob("*.ini"))
+                if inis:
+                    found[d] = max(p.stat().st_mtime for p in inis)
+            except OSError:
+                continue
+    return sorted(found.items(), key=lambda kv: kv[1], reverse=True)
+
+
 def _valid(wf, name, value) -> bool:
     try:
         wf.coerce({name: value})

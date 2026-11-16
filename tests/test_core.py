@@ -284,6 +284,23 @@ def test_qt_free_core_and_service():
     assert out.stdout.strip() == "[]", out.stdout
 
 
+def test_find_minimoke_installations_newest_first(tmp_path):
+    from core.config import minimoke_import
+    docs, desk = tmp_path / "Documents", tmp_path / "Desktop"
+    old = docs / "minimoke" / "configs" / "dac_config.ini"
+    new = desk / "MiniMoke-main" / "configs" / "procedures_config.ini"
+    for p in (old, new):
+        p.parent.mkdir(parents=True)
+        p.write_text("[x]\n")
+    (docs / "not_minimoke").mkdir()
+    (docs / "empty_configs" / "configs").mkdir(parents=True)
+    os.utime(old, (1_700_000_000, 1_700_000_000))
+    os.utime(new, (1_800_000_000, 1_800_000_000))
+    found = minimoke_import.find_installations([docs, desk, tmp_path / "missing"])
+    assert [p for p, _ in found] == [new.parents[1], old.parents[1]]
+    assert found[0][1] == 1_800_000_000
+
+
 def test_minimoke_import_prefers_unmarked_dll(tmp_path, samba_home, monkeypatch):
     from core.config import minimoke_import
     src = tmp_path / "MiniMoke-zip"

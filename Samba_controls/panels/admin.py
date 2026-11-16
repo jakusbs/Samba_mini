@@ -14,6 +14,75 @@ from core import paths
 from core.gui.bridge import error_text
 from core.protocol import ServiceError
 
+OTHER_FOLDER = "Other folder…"
+
+
+# --------------------------------------------------------------------------- MiniMoke import
+def choose_minimoke_folder(parent) -> str | None:
+    """Pick the MiniMoke folder to import from: the ones found on this PC (most
+    recently used first) or any other folder."""
+    import time
+
+    from core.config import minimoke_import
+    found = minimoke_import.find_installations()
+    if found:
+        items = [f"{p}   (settings last changed {time.strftime('%Y-%m-%d', time.localtime(t))})"
+                 for p, t in found] + [OTHER_FOLDER]
+        item, ok = QInputDialog.getItem(parent, "Import MiniMoke settings",
+                                        "MiniMoke folders on this PC (most recently used first).\n"
+                                        "MiniMoke's files are only read.", items, 0, False)
+        if not ok:
+            return None
+        if item != OTHER_FOLDER:
+            return str(found[items.index(item)][0])
+    src = QFileDialog.getExistingDirectory(parent, "MiniMoke folder (contains configs\\)",
+                                           os.path.expanduser("~\\Documents"))
+    return src or None
+
+
+def confirm_and_apply(parent, src: str, mode: str | None) -> dict | None:
+    """Read the MiniMoke folder, show what would be written and write machine.toml
+    (backup first) and the stage offsets.  Returns the import result with the
+    written paths under ``"written"``, or None if cancelled or failed."""
+    from core.config import minimoke_import
+    try:
+        res = minimoke_import.read_minimoke(src)
+    except (OSError, ValueError) as exc:
+        QMessageBox.warning(parent, "Import", str(exc))
+        return None
+    if not res["machine"]:
+        QMessageBox.warning(parent, "Import", f"No MiniMoke instrument settings found in {src}\\configs.")
+        return None
+    summary = json.dumps(res["machine"], indent=2) + "\n\nStage offsets: " + json.dumps(res["offsets"]) \
+        + "\n\nNotes:\n" + "\n".join(res["notes"]) + f"\n\nPresets: {', '.join(sorted(res['presets']))}"
+    box = QMessageBox(QMessageBox.Icon.Question, "Import MiniMoke settings",
+                      f"Write the instrument settings from\n{src}\ninto machine.toml (a backup is made) "
+                      "and the stage offsets?\nYour MiniMoke procedure settings will be saved as presets "
+                      "in your account.\n\nShow Details to see the values.",
+                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, parent)
+    box.setDetailedText(summary)
+    if box.exec() != QMessageBox.StandardButton.Yes:
+        return None
+    try:
+        res["written"] = minimoke_import.apply(res, mode)
+    except Exception as exc:  # noqa: BLE001
+        QMessageBox.warning(parent, "Import", f"Could not write the configuration: {exc}")
+        return None
+    return res
+
+
+def save_minimoke_presets(client, presets: dict) -> list[str]:
+    """Store MiniMoke's remembered procedure settings as presets of the logged-in user."""
+    problems = []
+    for key, values in presets.items():
+        for setup in ("longitudinal", "polar"):
+            try:
+                client.call("presets.save", {"workflow": f"samba_mini/{setup}", "name": f"MiniMoke {key}",
+                                             "value": {"workflow": key, "params": values}})
+            except ServiceError as exc:
+                problems.append(f"preset {key}: {error_text(exc)}")
+    return problems
+
 
 class UsersPanel(QWidget):
     message = pyqtSignal(str, str)
@@ -171,38 +240,14 @@ class ConfigPanel(QWidget):
         if b is None or not b.client.session or (b.client.user or {}).get("role") != "admin":
             QMessageBox.warning(self, "Import", "Log in as an administrator to change the machine configuration.")
             return
-        src = QFileDialog.getExistingDirectory(self, "MiniMoke folder (contains configs\\)",
-                                               os.path.expanduser("~\\Documents"))
+        src = choose_minimoke_folder(self)
         if not src:
             return
-        from core.config import minimoke_import
-        try:
-            res = minimoke_import.read_minimoke(src)
-        except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Import", str(exc))
-            return
-        summary = json.dumps(res["machine"], indent=2) + "\n\nStage offsets: " + json.dumps(res["offsets"]) \
-            + "\n\nNotes:\n" + "\n".join(res["notes"]) + f"\n\nPresets: {', '.join(sorted(res['presets']))}"
-        box = QMessageBox(QMessageBox.Icon.Question, "Import MiniMoke settings",
-                          "Write these values into machine.toml (a backup is made) and stage offsets?\n"
-                          "Your MiniMoke procedure settings will be saved as presets in your account.",
-                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
-        box.setDetailedText(summary)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
         mode = None if self.mode.currentIndex() == 0 else self.mode.currentText()
-        try:
-            written = minimoke_import.apply(res, mode)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Import", f"Could not write the configuration: {exc}")
+        res = confirm_and_apply(self, src, mode)
+        if res is None:
             return
-        for key, values in res["presets"].items():
-            for setup in ("longitudinal", "polar"):
-                try:
-                    b.client.call("presets.save", {"workflow": f"samba_mini/{setup}",
-                                                   "name": f"MiniMoke {key}",
-                                                   "value": {"workflow": key, "params": values}})
-                except ServiceError as exc:
-                    self.message.emit("warning", f"preset {key}: {error_text(exc)}")
-        self.message.emit("info", f"Imported MiniMoke settings: {written}. Restart the service to apply.")
+        for problem in save_minimoke_presets(b.client, res["presets"]):
+            self.message.emit("warning", problem)
+        self.message.emit("info", f"Imported MiniMoke settings: {res['written']}. Restart the service to apply.")
         self.refresh()
