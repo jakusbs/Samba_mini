@@ -93,6 +93,11 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   (service log: "7270: status chunk missing after a reply"), and discards a
   late chunk before the next command so replies stay aligned.  Why the 7270
   sometimes omits it is not known yet; the log count will show how often.
+  **Confirmed on the real setup** (service restarted 20:48:44 with
+  `9a1dc53`): calibration time scan 20:49:11, interval 0.2 s — 129 points at
+  0.202 s/point, longest gap 0.288 s, no gap over 1 s (the same scan on the
+  old service at 20:46:53: two 2.16 s gaps in 80 points).  The service log
+  counted 10 missing status chunks within the first ~35 s.
 
 ## Tests
 
