@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self._sl: dict | None = None                           # running scanlist
         self._sl_hall: list[float] = []                        # Hall readings of the current scan (mT)
         self._last_sample = ""                                 # for Samba's "new sample?" prompt
+        self._calib_run = False                                # a Calibration-tab time scan is running
         self._scan_t0: float | None = None
         self._map_data: dict[str, np.ndarray] = {}
         self._map_axes = None
@@ -468,6 +469,7 @@ class MainWindow(QMainWindow):
             self.set_setup(self.prefs["setup"])
         self._bd_load()
         self.kerr_state.set(bool(self.prefs.get("kerr_display", False)))
+        self.calibration.timescan.load(self.prefs.get("calib_timescan") or {})
 
     def _login_logout(self) -> None:
         c = self._client()
@@ -515,7 +517,6 @@ class MainWindow(QMainWindow):
             hw.set_readout(dev, attr, body.get("value"), q)
             if dev == "hall" and attr == "field_mT":
                 self.trajectory.add_field_reading(body.get("value"))
-            self.calibration.add_readback(dev, attr, body.get("value"))
             if dev == f"stage_{self.setup}" and attr in ("x_mm", "y_mm", "z_mm"):
                 self.calibration.set_position(attr[0], body.get("value"), q)
             if dev == "lockin" and attr == "xy" and isinstance(body.get("value"), dict):
@@ -697,7 +698,11 @@ class MainWindow(QMainWindow):
         return True
 
     def start_run(self) -> None:
-        """Start: a scanlist while the Scanlist tab is open (as in Samba), else one measurement."""
+        """Start, as in Samba: the Calibration tab's time scan while that tab is open, a scanlist
+        while the Scanlist tab is open, else the Trajectory measurement."""
+        if self.live_tabs.currentWidget() is self.calibration:
+            self.start_calibration_scan()
+            return
         if self.bottom_tabs.currentWidget() is self.scanlist:
             self.start_scanlist()
             return
@@ -713,7 +718,8 @@ class MainWindow(QMainWindow):
         self._set_running_ui(True)
         self._launch(wf, params, n)
 
-    def _launch(self, wf, params: dict, n: int, extra_meta: dict | None = None, label: str = "") -> None:
+    def _launch(self, wf, params: dict, n: int, extra_meta: dict | None = None, label: str = "",
+                config_name: str | None = None) -> None:
         meta = self.trajectory.metadata()
         data_dir = self._data_dir()
         notebook = self.prefs.get("lab_notebook") or os.path.join(data_dir, "lab_notebook_SambaMini.csv")
@@ -721,7 +727,8 @@ class MainWindow(QMainWindow):
         em.update(extra_meta or {})
         req = RunRequest(wf.key, params, setup=self.setup, geometry=meta["incidence"], sample=meta["sample"],
                          operator=meta["operator"], notes=meta["notes"],
-                         config_name=self.config_list.current_name() or "", save_dir=data_dir,
+                         config_name=(config_name if config_name is not None
+                                      else self.config_list.current_name() or ""), save_dir=data_dir,
                          export_csv=bool(self.prefs.get("export_csv", False)), lab_notebook=notebook,
                          extra_metadata=em, bd_calibration=self.bd_panel.get_calibration())
         self._prepare_plots(wf.key, params, n)
@@ -731,6 +738,49 @@ class MainWindow(QMainWindow):
         self._sl_hall = []
         self.engine.start()
         self._log("info", f"Started {wf.title} ({n} points){label}")
+
+    # ---------------------------------------------------------------- calibration time scan
+    def start_calibration_scan(self) -> None:
+        """Samba's calibration time scan: the Calibration tab's own samples / interval / Int, the
+        Trajectory tab's lock-in and coil settings of the time scan, no stage move.  The file is
+        named ..._calibration.h5 so the BD Calibration tab's Fit & Import finds it."""
+        if self.running:
+            return
+        c = self._client()
+        if self.bridge.probe(1.5) is None:
+            QMessageBox.warning(self, "Device service", "The device service is not running. "
+                                "Start Samba_controls first.")
+            return
+        if not c.session and not self.show_login():
+            return
+        wf = WORKFLOWS["time"]
+        ts = self.calibration.timescan.values()
+        params = dict(self.trajectory.params("time"))
+        params.update(duration=round(ts["n"] * ts["interval"], 9), interval=ts["interval"],
+                      acq_time=ts["acq_time"], position_stage=False)
+        try:
+            params = wf.coerce(params)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid parameters", f"{exc}\n\n(Lock-in and coil settings come from "
+                                "the Trajectory tab's time scan.)")
+            return
+        n = plans.time_points(params["duration"], params["interval"])
+        if not self._confirm_real(wf, params, "a calibration time scan") or not self._take_control():
+            return
+        try:
+            c.call("prefs.set", {"values": {"calib_timescan": ts}})
+            self.prefs["calib_timescan"] = ts
+        except ServiceError:
+            pass
+        self._sl = None
+        self._calib_run = True
+        self._run_t0 = time.time()
+        self._list = {"total": 1, "done": 0}
+        self._set_running_ui(True)
+        self.calibration.begin_scan(params["duration"], f"Calibration time scan: {n} samples, "
+                                    f"{params['interval']:g} s apart, Int {params['acq_time']:g} s")
+        self._launch(wf, params, n, {"calibration_scan": True}, " — calibration time scan",
+                     config_name="calibration")
 
     # ---------------------------------------------------------------- scanlist
     def start_scanlist(self) -> None:
@@ -882,6 +932,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._next_scan)
                 return
             self._finish_scanlist()
+        self._calib_run = False
         self._set_running_ui(False)
         self._run_state = "IDLE"
         self._tint("IDLE")
@@ -1040,7 +1091,8 @@ class MainWindow(QMainWindow):
             shown = self.right.map_combo.currentData() or "dc_signal"
             self.map2d.update_point(ev["ix"], ev["iy"], vals.get(shown, math.nan))
         rec = ev.get("record", {})
-        self.calibration.add_record(rec)
+        if self._calib_run:
+            self.calibration.add_point(float(ev.get("x", math.nan)), rec)
         if self._sl is not None:
             h = rec.get("hall_field_mT")
             if isinstance(h, (int, float)):

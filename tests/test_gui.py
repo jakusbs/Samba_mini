@@ -421,3 +421,41 @@ def test_crash_guard_keeps_the_window_open(qapp, tmp_path, monkeypatch):
             if getattr(h, "_samba_file", False):
                 root.removeHandler(h)
                 h.close()
+
+
+def test_calibration_tab_measures_only_on_start(qapp, service, tmp_path):
+    """Samba: Start while the Calibration tab is open runs the tab's own time scan; nothing is
+    measured into its plot otherwise.  The file is named for the BD Calibration Fit & Import."""
+    import os
+
+    from core import bd_fit
+    from core.gui.bridge import ServiceBridge
+    from core.storage.hdf5_writer import read_file
+    from Samba_mini.app import MainWindow
+
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    w.show()
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    w.dir_edit.setText(str(tmp_path / "data"))
+    w.live_tabs.setCurrentWidget(w.calibration)
+    t0 = time.time()
+    while time.time() - t0 < 2.5:                      # idle readbacks arrive about once a second
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert all(not v for v in w.calibration.plot.data.values())
+    w.calibration.timescan.load({"n": 6, "interval": 0.05, "acq_time": 0.01})
+    w.trajectory.set_params("time", {"time_const": 0.1, "volt": 0.0})
+    w.start_run()
+    assert w._calib_run
+    assert wait_until(qapp, lambda: not w._calib_run, 60)       # the window has handled the whole run
+    res = w.engine.result
+    assert res["status"] == "completed" and res["points"] == 6
+    assert bd_fit.is_time_calibration(res["path"]), os.path.basename(res["path"])
+    meta = read_file(res["path"])["metadata"]
+    assert json.loads(meta["params_json"])["position_stage"] is False and bool(meta["calibration_scan"])
+    assert len(w.calibration.plot.data["dc_signal"]) == 6
+    w.close()
