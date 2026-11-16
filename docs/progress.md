@@ -83,12 +83,22 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   Scanlist tab (one file per scan, Samba's scanlist `.txt`).  MiniMoke's
   `repeat_num` is now always 1 — an X/Y-sweep still measures its line at +B
   and at −B, an XY map once; configurations saved with more repeats run once.
+* 2026-11-16 — **"Measurement freezes" fix (7270 over Ethernet).**  The point
+  timestamps of today's real runs showed points taking +2.0 s (the 7270 read
+  timeout): in the 19:46 calibration time scan points 5, 6, 40 and then 78–80
+  in a row; in the X-sweeps every other point or so.  After each reply the
+  7270's Ethernet socket sends an extra status chunk; when it did not come,
+  the driver (like MiniMoke's) waited the full 2 s timeout for it, silently.
+  The driver now waits at most 100 ms for it, counts and logs missing chunks
+  (service log: "7270: status chunk missing after a reply"), and discards a
+  late chunk before the next command so replies stay aligned.  Why the 7270
+  sometimes omits it is not known yet; the log count will show how often.
 
 ## Tests
 
-`scripts\run_tests.bat` → **74 passed** (≈75 s) on the measurement PC,
+`scripts\run_tests.bat` → **76 passed** (≈80 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 15, engine 13, drivers
-12, core 16, recovery 4, process 2, GUI 12.  See the README table for what each
+14, core 16, recovery 4, process 2, GUI 12.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,

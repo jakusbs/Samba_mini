@@ -5,6 +5,7 @@ MiniMoke.  They do not prove the instruments behave as the fakes do; the
 hardware checks are listed in docs/progress.md.
 """
 
+import time
 import sys
 import types
 
@@ -490,3 +491,52 @@ def test_hall_refuses_dll_with_download_mark(tmp_path, monkeypatch):
         h.connect()
     assert "marked as downloaded" in e.value.message
     assert h.state.value == "DISABLED"
+
+
+class FlakyFake7270(Fake7270):
+    """The real 7270 Ethernet link sometimes omits the status chunk after a reply, or sends it late.
+    An empty queue costs the full read timeout, as on the real link."""
+
+    def __init__(self, *a, drop_every=3, late=False, **k):
+        super().__init__(*a, **k)
+        self.n = 0
+        self.drop_every = drop_every
+        self.late = late
+        self.pending = []
+
+    def write(self, cmd):
+        super().write(cmd)
+        self.n += 1
+        if self.extra and cmd != "ID" and self.n % self.drop_every == 0:
+            self.queue.pop()                                  # the status chunk does not come now
+            if self.late:
+                self.pending.append("\n")                     # ... but shortly after
+
+    def read(self):
+        if not self.queue:
+            self.queue.extend(self.pending)                   # a late chunk arrives while we wait
+            self.pending.clear()
+            time.sleep(self.timeout / 1000.0)
+            raise TimeoutError("timeout")
+        return self.queue.pop(0)
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_ametek_missing_status_chunk_does_not_stall(fake_pyvisa, monkeypatch, late):
+    """Regression (16 Nov, real 7270): a missing status chunk cost the full 2 s read timeout per
+    point ("the measurement freezes").  Now the driver waits briefly and stays aligned."""
+    import Samba_controls.service.devices.ametek7270 as am
+    rm = FakeRM(socket_framing=True)
+    rm.open_resource = lambda res, read_termination=None, write_termination=None: (
+        rm.opened.append(FlakyFake7270(res, True, late=late)) or rm.opened[-1])
+    fake_pyvisa["rm"] = rm
+    li = am.Ametek7270("lockin", {"resource": "TCPIP0::192.168.77.2::50000::SOCKET", "timeout_ms": 2000})
+    li.connect()
+    assert li._extra_chunks == 1
+    t0 = time.perf_counter()
+    for _ in range(30):
+        x, y = li.hw_read_xy()
+        assert x == pytest.approx(1e-4) and y == pytest.approx(-2e-5)     # never a misaligned reply
+    elapsed = time.perf_counter() - t0
+    assert li.missing_chunks >= 9
+    assert elapsed < 30 * 0.15, f"{elapsed:.1f} s for 30 reads"              # was ~2 s per missing chunk
