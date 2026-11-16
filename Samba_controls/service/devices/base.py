@@ -272,10 +272,19 @@ class Device:
     # helper for subclasses: bounded, cancellable sleep
     @staticmethod
     def sleep(seconds: float, ctx: CallContext | None = None) -> None:
+        """High-resolution, cancellable sleep.
+
+        ``time.sleep`` is high resolution on Windows since Python 3.11, while
+        ``Event.wait`` timeouts can be ~15 ms coarse, so sleep in short slices
+        and check the cancel token between them.
+        """
         if seconds <= 0:
             return
-        if ctx is not None and ctx.cancel is not NEVER_CANCELLED:
-            if ctx.cancel.wait(seconds):
-                ctx.cancel.raise_if_cancelled()
-        else:
-            time.sleep(seconds)
+        end = time.perf_counter() + seconds
+        cancel = ctx.cancel if ctx is not None else NEVER_CANCELLED
+        while True:
+            cancel.raise_if_cancelled()
+            left = end - time.perf_counter()
+            if left <= 0:
+                return
+            time.sleep(min(left, 0.02))

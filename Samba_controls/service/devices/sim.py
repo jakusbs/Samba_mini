@@ -37,7 +37,7 @@ class SimPhysics:
         self._lock = threading.Lock()
         self._coil = 0.0
         self._coil_prev_field = 0.0
-        self._coil_t = time.monotonic()
+        self._coil_t = time.perf_counter()
         self._branch = 1            # +1: descending branch (came from +saturation)
         self.osc_V = 0.0
         self.stage_pos_mm = {"x": 0.0, "y": 0.0}
@@ -46,7 +46,7 @@ class SimPhysics:
 
     def set_coil(self, volts: float) -> None:
         with self._lock:
-            now = time.monotonic()
+            now = time.perf_counter()
             self._coil_prev_field = self._field_at(now)
             self._coil = float(volts)
             self._coil_t = now
@@ -58,7 +58,7 @@ class SimPhysics:
 
     def field_mT(self, t: float | None = None) -> float:
         with self._lock:
-            return self._field_at(time.monotonic() if t is None else t)
+            return self._field_at(time.perf_counter() if t is None else t)
 
     def magnetisation(self, field_mT: float) -> float:
         sat = self.hc_mT + 3 * self.width_mT
@@ -106,7 +106,7 @@ class SimDaq(DaqBase):
             raise ServiceError(ErrorCode.DEVICE_FAULT, "simulated DAQ start failure")
         coil = float(buffer[2, 0])
         self.physics.set_coil(coil)
-        self._started = {"t0": time.monotonic(), "n": buffer.shape[1]}
+        self._started = {"t0": time.perf_counter(), "n": buffer.shape[1]}
 
     def _hw_wait_read(self, n, timeout_s):
         st = self._started
@@ -115,7 +115,7 @@ class SimDaq(DaqBase):
             raise ServiceError(ErrorCode.DEVICE_FAULT, "simulated DAQ: no task running")
         duration = n / self.rate
         hang = self.physics.should_fail("daq.hang")
-        remaining = (st["t0"] + duration) - time.monotonic()
+        remaining = (st["t0"] + duration) - time.perf_counter()
         if hang or remaining > timeout_s:
             time.sleep(min(timeout_s, max(remaining, 0)))
             raise ServiceError(ErrorCode.TIMEOUT, "simulated DAQ wait_until_done timed out")
@@ -238,7 +238,7 @@ class SimStage(StageBase):
         if m is None:
             return
         start, target, t0, dur = m
-        frac = 1.0 if dur <= 0 else min(1.0, (time.monotonic() - t0) / dur)
+        frac = 1.0 if dur <= 0 else min(1.0, (time.perf_counter() - t0) / dur)
         self._raw[axis] = start + (target - start) * frac
         if frac >= 1.0:
             del self._motion[axis]
@@ -267,7 +267,7 @@ class SimStage(StageBase):
         dur = dist_mm / self.speed_mm_s
         if self.physics.should_fail(f"{self.name}.stuck"):
             dur = 1e9
-        self._motion[axis] = (start, float(raw_target), time.monotonic(), dur)
+        self._motion[axis] = (start, float(raw_target), time.perf_counter(), dur)
 
     def hw_move_rel_raw(self, axis, raw_delta):
         self._update(axis)
