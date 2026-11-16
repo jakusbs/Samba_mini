@@ -14,7 +14,7 @@ pushed to `jakusbs/Samba_mini`.  Not merged.
 | 5 Samba_controls UI | done — service lifecycle, device table/detail, manual commands, users, configuration import |
 | 6 Real drivers | written and tested against fake vendor libraries; **not run on the instruments** |
 | 7 Hardening and documentation | done — recovery tests, launchers, installation/troubleshooting |
-| 8 Hardware validation | read-only connection check done for DAQ, 7270 and Kinesis stage; the rest pending |
+| 8 Hardware validation | read-only connection checks done for DAQ, 7270, Kinesis stage and Hall probe; the rest pending |
 
 Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
 3.11.2, h5py 3.16.0, pyzmq 27.3.0, argon2-cffi 25.1.0, nidaqmx 1.4.1, PyVISA
@@ -22,9 +22,9 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
 
 ## Tests
 
-`scripts\run_tests.bat` → **57 passed** (≈60 s) on the measurement PC,
+`scripts\run_tests.bat` → **59 passed** (≈60 s) on the measurement PC,
 simulation and fake drivers only.  Per area: service 14, engine 11, drivers
-11, core 13, recovery 4, process 2, GUI 2.  See the README table for what each
+12, core 14, recovery 4, process 2, GUI 2.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
@@ -51,19 +51,39 @@ writes motor currents).  MiniMoke, Kinesis GUI and TMCL-IDE were not running.
 | Refusals | `lease.acquire` and `daq.zero_outputs` → FORBIDDEN |
 | Shutdown | exit code 0; "read-only mode: shutdown cleanup skipped" |
 
+**2026-11-16 14:42 — read-only Hall probe check (authorised; the user asked
+for Magnet-Physik's *USB Teslameter* application to be closed, which was done
+with a normal window close).**  Same `--read-only` service, Hall probe only.
+
+* The first attempt failed before touching the probe: .NET refused to load
+  `Documents\Minimoke-bugfixed\libs\MagnetPhysik.Usb.dll` (HRESULT
+  0x80131515, "network location").  That copy — like `Desktop\MiniMoke-main_mlfi`
+  and the downloaded snapshot — carries Windows' Mark of the Web
+  (Zone.Identifier); the byte-identical copies in `Documents\minimoke\libs`,
+  `Documents\minimoke-upgrade\libs` and `Desktop\MiniMOKE` do not.  This is why
+  MiniMoke hard-codes the `Documents\minimoke\libs` path.  The driver now
+  reports this case explicitly and the importer prefers an unmarked copy;
+  nothing was unblocked.
+* With `Documents\minimoke\libs\MagnetPhysik.Usb.dll`: probe ON; Speed 1
+  (470 samples/s) and Filter 0 (filter off) were read, not written; five reads
+  0.027, 0.028, 0.028, 0.044, 0.045 mT (no coil current; near-zero ambient
+  field).  The DLL loaded and read on the service worker thread without
+  MiniMoke's `pythoncom.CoInitializeEx` call.  Zeroing was refused (FORBIDDEN).
+* The USB Teslameter application was left closed; reopen it if it is needed.
+
 ## Remaining hardware checks
 
 Each needs the instruments; ask the lab before anything that moves or
 energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
 
-1. **Read-only connection, remainder:** Hall probe (close the *USB Teslameter*
-   application first; `--read-only` reads Speed/Filter without writing them)
-   and the polar stage (its connect writes MiniMoke's motor-current and
-   StealthChop parameters — treat as energising; not possible read-only).
-2. **Hall probe threading/COM:** MiniMoke called
-   `pythoncom.CoInitializeEx(APARTMENTTHREADED)` at start-up without saying
-   why; the service loads the DLL in a worker thread without it (pywin32 is
-   not installed).  Verify reads and zeroing; add COM initialisation if needed.
+1. **Polar stage connection:** its connect writes MiniMoke's motor-current and
+   StealthChop parameters — treat as energising; not possible read-only.
+   Never run it together with the USB Teslameter application holding the
+   Hall probe (same for MiniMoke).
+2. **Hall probe zeroing and writes:** reads work on the worker thread without
+   COM initialisation (checked); setting Speed/Filter and zeroing (writes) are
+   still untested.  The probe was found with Filter 0 (off) — Samba_mini sets
+   the integration per workflow, MiniMoke reset it to 0.5 s at the end of runs.
 3. **DAQ timing (finding F1 fix):** with the coil connected, confirm the coil
    steps at the trigger and that the settle prefix removes the transient;
    compare a DC loop with MiniMoke on the same sample.  Confirm the AO holds
@@ -99,6 +119,7 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
 
 ## Next step
 
-Phase 8, item 1 remainder: close the *USB Teslameter* app and run
-`scripts\service_console.bat --mode real --read-only` to check the Hall
-probe; then, with the lab's go-ahead, items 2–9 (these write outputs or move).
+With the lab's go-ahead, remaining items 1–9 (these write settings, energise
+outputs or move stages).  When creating the real `machine.toml`, make sure
+`[hall] dll_path` points to `Documents\minimoke\libs\MagnetPhysik.Usb.dll`
+(the importer now chooses it automatically).

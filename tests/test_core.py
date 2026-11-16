@@ -282,3 +282,23 @@ def test_qt_free_core_and_service():
     out = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "[]", out.stdout
+
+
+def test_minimoke_import_prefers_unmarked_dll(tmp_path, samba_home, monkeypatch):
+    from core.config import minimoke_import
+    src = tmp_path / "MiniMoke-zip"
+    (src / "configs").mkdir(parents=True)
+    (src / "libs").mkdir()
+    marked = src / "libs" / "MagnetPhysik.Usb.dll"
+    marked.write_bytes(b"x")
+    with open(f"{marked}:Zone.Identifier", "w") as f:
+        f.write("[ZoneTransfer]\nZoneId=3\n")
+    fake_home = tmp_path / "user"
+    good = fake_home / "Documents" / "minimoke" / "libs" / "MagnetPhysik.Usb.dll"
+    good.parent.mkdir(parents=True)
+    good.write_bytes(b"x")
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("HOME", str(fake_home))
+    res = minimoke_import.read_minimoke(src)
+    assert res["machine"]["hall"]["dll_path"] == str(good)
+    assert any("marked as downloaded" in n for n in res["notes"])

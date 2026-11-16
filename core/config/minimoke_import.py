@@ -21,6 +21,7 @@ import argparse
 import configparser
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -116,10 +117,22 @@ def read_minimoke(src: Path | str) -> dict:
         if ps.has_section("Offsets"):
             offsets["polar"] = {a: _num(ps["Offsets"].get(f"offset_{a}"), 0.0) for a in ("x", "y", "z")}
 
-    dll = src / "libs" / "MagnetPhysik.Usb.dll"
-    if dll.is_file():
-        out_machine["hall"]["dll_path"] = str(dll)
-        notes.append(f"Hall DLL found at {dll} (not copied; vendor file)")
+    # MiniMoke's hallsensor_class.py tries a fixed "known-good" copy in
+    # Documents\minimoke\libs first: copies extracted from a downloaded zip
+    # carry the Mark of the Web and .NET refuses to load them.
+    candidates = [src / "libs" / "MagnetPhysik.Usb.dll",
+                  Path(os.path.expanduser("~")) / "Documents" / "minimoke" / "libs" / "MagnetPhysik.Usb.dll"]
+    existing = [p for p in candidates if p.is_file()]
+    clean = [p for p in existing if not paths.has_download_mark(p)]
+    if clean:
+        out_machine["hall"]["dll_path"] = str(clean[0])
+        notes.append(f"Hall DLL: {clean[0]} (not copied; vendor file)")
+        for p in existing:
+            if p not in clean:
+                notes.append(f"{p} is marked as downloaded (Zone.Identifier) and would not load; not used")
+    elif existing:
+        out_machine["hall"]["dll_path"] = str(existing[0])
+        notes.append(f"Hall DLL {existing[0]} is marked as downloaded and will not load until it is unblocked")
 
     presets = {}
     pc = _read_ini(cfg_dir / "procedures_config.ini")

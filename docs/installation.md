@@ -107,6 +107,8 @@ CSV for existing scripts: tick *Also export CSV*, or
 | Configuration status *invalid* | `machine.toml` could not be parsed or failed validation; a copy is kept as `machine.toml.bad-<time>`; all hardware disabled until fixed. The problems are listed in Samba_controls → *Machine configuration*. |
 | `lockin` FAULT "not reachable" | 7270 off, cable/network, or another program (MiniMoke) holds its Ethernet slot. Port 50001 is tried automatically. Power-cycle the 7270 if a crashed program left the slot occupied. |
 | `hall` DISABLED "DLL not found" | Set `[hall] dll_path` to the 64-bit `MagnetPhysik.Usb.dll`. |
+| `hall` DISABLED "marked as downloaded" | The DLL copy came from a downloaded zip (Mark of the Web) and .NET will not load it. Use an unmarked copy (on the MiniMOKE PC: `Documents\minimoke\libs`) or unblock the file after checking where it came from. |
+| `hall` cannot connect | Close Magnet-Physik's *USB Teslameter* application and MiniMoke; only one program can use the probe. |
 | `stage_longitudinal` FAULT | Close the Kinesis GUI; check serial numbers in `machine.toml`. |
 | `daq` FAULT | NI MAX: device name must match `[daq] device`; MiniMoke must be closed. |
 | "Controlled by …" | Another user holds control; ask them to release it, or an administrator uses *Force release…* (stops their run and cleans up). |
