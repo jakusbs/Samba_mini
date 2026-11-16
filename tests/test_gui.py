@@ -503,3 +503,23 @@ def test_stage_can_be_moved_during_a_calibration_scan(qapp, service, tmp_path):
     assert wait_until(qapp, lambda: w.start_btn.isEnabled(), 60)      # the window has handled the end
     assert w.calibration.stage_box.isEnabled()
     w.close()
+
+
+def test_calibration_plot_time_axis_follows_the_data(qapp):
+    """The calibration plot's time axis grows with the recorded data instead of spanning the
+    planned duration (a 10000-sample scan squeezed its first minutes into a sliver)."""
+    from Samba_mini.panels.calibration import ScanPlot
+
+    p = ScanPlot()
+    p.show()
+    p.begin(500.0, "long scan")
+    for t in (0.0, 0.2, 0.4, 0.6):
+        p.add(t, {"balanced_V": 0.01 + t, "intensity_V": 1.0})
+    p._redraw(force=True)
+    lo, hi = p.x_limits()
+    assert lo == 0.0 and 0.6 <= hi < 1.0
+    for t in (5.0, 10.0):
+        p.add(t, {"balanced_V": 0.02, "intensity_V": 1.0})
+    p._redraw(force=True)
+    assert 10.0 <= p.x_limits()[1] < 11.0
+    p.close()
