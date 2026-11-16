@@ -238,3 +238,40 @@ def test_manual_connect_results_are_logged(admin_client, caplog):
     assert any(l.startswith(f"connect stage_polar by {who}: ON") for l in lines)
     assert any(l.startswith(f"reconnect stage_polar by {who}: ON") for l in lines)
     assert any(l.startswith(f"connect no_such_device by {who} failed:") for l in lines)
+
+
+def test_devices_a_run_does_not_use_stay_free(admin_client):
+    """During a run only the devices it declared are locked: the stage can be moved to focus
+    during a time scan, but not during a run that uses it; the run's own devices stay locked."""
+    c = admin_client
+    c.acquire_lease()
+    stage = c.device("stage_longitudinal")
+
+    def run(required, use_stage_expected_free):
+        c.call("run.begin", {"required_devices": required, "workflow": "time"})
+        op = c.device("moke").start_operation("time_trace", coil_V=0.0, n_points=200, interval_s=0.02,
+                                              acq_time_s=0.005, hall=False, lockin=True)
+        op.poll(0.2)
+        try:
+            if use_stage_expected_free:
+                before = stage.read_value("x_mm")
+                stage.command("jog", axis="x", delta_mm=0.01)
+                r = stage.read("x_mm")["x_mm"]
+                assert r.source == "device" and abs(r.value - (before + 0.01)) < 1e-6
+            else:
+                with pytest.raises(ServiceError) as e:
+                    stage.command("jog", axis="x", delta_mm=0.01)
+                assert e.value.code == ErrorCode.BUSY
+            with pytest.raises(ServiceError) as e:                     # the run's own device
+                c.device("daq").command("set_outputs", coil_V=0.1)
+            assert e.value.code == ErrorCode.BUSY
+            assert c.device("daq").read("balanced_V")["balanced_V"].source != "device"   # coordinated
+        finally:
+            op.abort()
+            t0 = time.time()
+            while not op.done and time.time() - t0 < 10:
+                op.poll(0.5)
+            c.call("run.end", {})
+
+    run(["daq", "moke", "lockin"], use_stage_expected_free=True)                       # calibration scan
+    run(["daq", "moke", "lockin", "stage_longitudinal"], use_stage_expected_free=False)  # e.g. X-sweep

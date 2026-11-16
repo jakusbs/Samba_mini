@@ -233,6 +233,12 @@ the owners' workers).  Logical devices never open hardware themselves.
   only then frees the lease (`LEASE_RECONCILING` until done).  Reads and cached
   monitoring do not need the lease; monitoring never polls an instrument that
   an operation is using — it serves the operation's latest values instead.
+* **Devices of a run:** `run.begin(required_devices=...)` declares what a
+  measurement uses.  While it runs, only those devices are locked (commands
+  refused with `BUSY` except `stop`, reads served from the run's values, no
+  monitor polling).  Undeclared devices stay usable by the lease holder — e.g.
+  the stage during a calibration or time scan without stage positioning, so
+  the sample can be focused while the signal is recorded.
 * User switching while a measurement runs is refused by the backend
   (`auth.logout` with the lease held by a running operation → `BUSY`).
 * These accounts organise access and attribution on a shared Windows login; they

@@ -179,8 +179,10 @@ def test_logout_blocked_during_run_and_manual_control_busy(admin_client):
     with pytest.raises(ServiceError) as e:
         admin_client.call("auth.logout")
     assert e.value.code == ErrorCode.BUSY
-    r = admin_client.device("hall").read("field_mT")["field_mT"]          # coordinated readback
-    assert r.source.startswith("cache")
+    r = admin_client.device("daq").read("balanced_V")["balanced_V"]       # the run's device:
+    assert r.source != "device"                                           # coordinated readback
+    r = admin_client.device("hall").read("field_mT")["field_mT"]          # not declared by the run:
+    assert r.source == "device"                                           # read live
     op.abort()
     while not op.done:
         op.poll(0.5)

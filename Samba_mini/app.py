@@ -736,8 +736,14 @@ class MainWindow(QMainWindow):
         self._scan_t0 = time.time()
         self._progress = (0, n)
         self._sl_hall = []
+        # The service locks only the devices a run declares: a run that does not use the stage
+        # (calibration and time scans without stage positioning) leaves it free to move, e.g. to
+        # focus while the signal is recorded.
+        stage_free = f"stage_{self.setup}" not in wf.required_devices(params, self.setup)
+        self.calibration.set_stage_enabled(stage_free, during_run=True)
         self.engine.start()
-        self._log("info", f"Started {wf.title} ({n} points){label}")
+        self._log("info", f"Started {wf.title} ({n} points){label}"
+                  + (" — the stage can be moved meanwhile" if stage_free else ""))
 
     # ---------------------------------------------------------------- calibration time scan
     def start_calibration_scan(self) -> None:
