@@ -187,6 +187,9 @@ def test_trajectory_layout_round_trips_every_minimoke_workflow(qapp):
         got = wf.coerce(t.params())
         assert set(got) == set(values), key
         for name, v in values.items():
+            if name == "repeat_num":          # no Repeats field: repeats are done with the Scanlist
+                assert got[name] == 1
+                continue
             assert got[name] == pytest.approx(v), (key, name, got[name], v)
     # each measurement keeps its own lock-in / timing values (MiniMoke remembered them per procedure)
     t.set_workflow("b_sweep_lockin")

@@ -320,7 +320,6 @@ class TimingGroup(QGroupBox):
             "settle_time": _dspin(0.0, 60.0, 3, "s", 90),
             "field_settle_s": _dspin(0.0, 60.0, 3, "s", 90),
             "interval": _dspin(1e-6, 86400.0, 4, "s", 90),
-            "repeat_num": _ispin(1, 1000, 90),
             "record_hall": QCheckBox("Record Hall"),
         }
         tips = {"acq_time": "Int: how long each point is averaged (DAQ window at 50 kHz; the Hall probe "
@@ -331,14 +330,12 @@ class TimingGroup(QGroupBox):
                             "Samples N × interval = duration (MiniMoke's 'Sampling interval').\n"
                             "Each sample is averaged for Int; if Int is longer than the interval, the samples\n"
                             "simply follow one another.",
-                "repeat_num": "Spatial scans only (MiniMoke's 'Repeat number'):\n"
-                              "X- / Y-sweep: each repeat measures the whole line at +B, then again at −B\n"
-                              "(B = coil command), so N repeats = 2·N passes over the line.\n"
-                              "XY map: the whole map is measured N times at +B; repeats 2… are stored in\n"
-                              "their own data groups.",
                 "record_hall": "Read the Hall probe at every point (MiniMoke always did)"}
+        # No "Repeats" field: as in Samba, a measurement is repeated with the Scanlist tab (one file
+        # per scan).  MiniMoke's repeat_num is always 1: an X/Y-sweep measures its line once at +B
+        # and once at −B, an XY map is measured once.
         rows = [("Int (s):", "acq_time"), ("Settle (s):", "settle_time"), ("B settle (s):", "field_settle_s"),
-                ("Interval (s):", "interval"), ("Repeats:", "repeat_num")]
+                ("Interval (s):", "interval")]
         self.labels = {}
         for r, (label, key) in enumerate(rows):
             lbl = QLabel(label)
@@ -570,6 +567,7 @@ class TrajectoryPanel(QWidget):
     def _all_values(self, key: str) -> dict:
         shared = self._shared_from_widgets() if key == self.current else self._shared.get(key, {})
         v = dict(shared)
+        v["repeat_num"] = 1                   # repeats are done with the Scanlist tab (see TimingGroup)
         if key in FIELD_KEYS:
             v.update((self.li_box if key == "b_sweep_lockin" else self.dc_box).values())
             v.update(x=self.f_x.value(), y=self.f_y.value(), position_stage=self.f_move.isChecked())
