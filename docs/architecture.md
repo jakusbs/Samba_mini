@@ -100,8 +100,8 @@ Magnet-Physik, not redistributed here).
 |---|---|---|
 | Samba `core/theme.py`, `DARK_STYLE` | `core/theme.py` | copied; stylesheet moved next to the tokens |
 | Samba `core/plot_interact.py`, `plot_widgets.py`, `kerr.py` | `core/plot_interact.py`, `core/plot_widgets.py`, `core/kerr.py` | copied; bare imports → package imports, config constants from `core/plot_config.py` |
-| Samba `core/data_browser.py`, `scan_index.py` | same names in `core/` | copied; package imports; index dir → `%LOCALAPPDATA%\SambaMini\state`; averaged-loop subgroup support |
-| Samba `panels/config_list.py`, `_widgets.py` (subset) | `Samba_mini/panels/` | adapted (presets stored per user in the backend) |
+| Samba `core/data_browser.py`, `scan_index.py` | same names in `core/` | copied; package imports; search index in `%LOCALAPPDATA%\SambaMini\state`; sub-group channels (averaged loop, XY repeats) added |
+| Samba `panels/config_list.py`, `_widgets.py` (NoScroll widgets) | `Samba_mini/panels/config_list.py`, `widgets.py` | adapted; configurations stored per user in the service's account database |
 | Samba `samba.py` layout | `Samba_mini/app.py` | layout reproduced, code rewritten (no god object) |
 | Samba runner HDF5 writer (`_open_hdf5`, `_write_point`, `_finalize_hdf5`) | `core/storage/hdf5_writer.py` | re-implemented with the same schema; no `hw_*`/TANGO fields |
 | Samba `ScanWorker`/runner control flags | `core/scan/engine.py` | re-implemented Qt-free with an explicit state machine |
@@ -237,9 +237,8 @@ the owners' workers).  Logical devices never open hardware themselves.
   newer than the previous one or whose request token does not match.
 * **Completion:** DAQ — `wait_until_done` with `acq_time + settle + 10 s`;
   Hall — integration time then one read; lock-in — one `XY.` transaction after
-  the settle window; stages — `wait_move`/position-reached poll with a timeout
-  derived from distance and the configured speed, followed by a position
-  readback that is recorded.
+  the settle window; stages — poll `is_moving`/position-reached (AP 8) with the configured
+  `move_timeout_s` bound, followed by a position readback that is recorded.
 * **Retries:** a timed-out move is never repeated blindly.  The backend reads
   the position back, reports `TIMEOUT` with the readback, and the engine pauses
   the run (MiniMoke's auto-pause behaviour) for the operator to decide.

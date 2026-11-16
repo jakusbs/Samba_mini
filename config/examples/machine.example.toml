@@ -1,0 +1,78 @@
+# Samba_mini machine configuration -- EXAMPLE (sanitised).
+#
+# Copy to %LOCALAPPDATA%\SambaMini\config\machine.toml, or create it with
+# Samba_controls -> Machine configuration -> "Import MiniMoke settings...".
+# This file is shared by every user of the PC (wiring, addresses, limits,
+# calibration).  Per-user preferences live in the account database instead.
+# A malformed file is never overwritten: it is copied to machine.toml.bad-<time>
+# and all hardware stays disabled until it is fixed.
+
+schema_version = 1
+
+[backend]
+mode = "simulation"          # "real" or "simulation" -- never mixed
+rpc_port = 47811             # bound to 127.0.0.1 only
+event_port = 47812
+lease_ttl_s = 15.0           # control is lost after this long without heartbeats
+session_idle_timeout_s = 43200.0
+reconcile_wait_s = 60.0      # how long to wait for operations to stop before freeing control
+
+[daq]                        # NI-DAQ (MiniMoke configs/dac_config.ini)
+enabled = true
+device = "Dev1"
+ao_mod1 = "Dev1/ao1"         # AC_Output1
+ao_mod2 = "Dev1/ao2"         # AC_Output2
+ao_coil = "Dev1/ao3"         # Coils_Output -> coil amplifier command (V)
+ai_balanced = "Dev1/ai0"     # Balanced_diodes_Input
+ai_intensity = "Dev1/ai1"    # Intensity_diode_Input
+trigger_terminal = "/Dev1/PFI0"
+sampling_rate_Hz = 50000.0
+
+[coil]
+min_V = -6.0                 # MiniMoke parameter limits (labelled "A" there)
+max_V = 6.0
+# amps_per_volt = 1.0        # amplifier transfer; UNKNOWN -- leave unset until measured
+
+[field_calibration]
+# mT_per_V = 100.0           # optional; enables magnet.field_estimate_mT (an estimate, never stored as data)
+
+[lockin]                     # Ametek / Signal Recovery 7270
+enabled = true
+model = "ametek7270"
+resource = "TCPIP0::<lock-in IP>::50000::SOCKET"   # or "USB0::0x0A2D::0x001B::<serial>::RAW"
+timeout_ms = 2000
+reconnect_attempts = 6
+allow_usb_reset = false      # pnputil re-enumeration needs administrator rights
+max_oscillator_V = 5.0
+
+[hall]                       # Magnet-Physik USB Teslameter (pythonnet)
+enabled = true
+dll_path = "%USERPROFILE%\\Documents\\<MiniMoke folder>\\libs\\MagnetPhysik.Usb.dll"   # 64-bit build
+speed = 1                    # 470 samples/s
+default_integration_s = 0.5
+
+[stages.longitudinal]        # Thorlabs Kinesis via pylablib (close the Kinesis GUI first)
+enabled = true
+driver = "kinesis"
+serial_x = "<serial>"
+serial_y = "<serial>"
+serial_z = "<serial>"
+mm2steps = 2184533.0
+backlash_mm = 0.02
+move_timeout_s = 120.0
+# limits_mm = { x = [-6.0, 6.0], y = [-6.0, 6.0], z = [-6.0, 6.0] }   # software limits (user coordinates)
+
+[stages.polar]               # Trinamic TMCM-3212 via pytrinamic
+enabled = true
+driver = "trinamic"
+port = "auto"
+module_id = 1
+mm2steps_x = 51200.0
+mm2steps_y = 51200.0
+mm2steps_z = 51200.0
+move_timeout_s = 120.0
+
+[cleanup]                    # what runs at the end of a run, on abort, and when control is lost
+zero_coil = true             # coil command -> 0 V (MiniMoke did this instantly)
+lockin_output_off = true     # OA. 0 (MiniMoke meas.shutdown())
+stop_stages = true

@@ -1,0 +1,11 @@
+# Samba_mini / Samba_controls -- GUI, client and service core (Python 3.11).
+# Verified together in the SambaMini conda environment on the measurement PC.
+PyQt6==6.10.2
+PyQt6-Qt6==6.10.2
+PyQt6_sip==13.13.1
+matplotlib==3.11.2
+numpy==2.4.6
+h5py==3.16.0
+pyzmq==27.3.0
+argon2-cffi==25.1.0
+tomli-w==1.2.0

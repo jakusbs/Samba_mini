@@ -106,6 +106,10 @@ class Device:
             "state": self.state.value,
             "status": self.status,
             "last_error": self.last_error,
+            "capabilities": sorted({f"read:{a.name}" for a in self.ATTRIBUTES}
+                                   | {f"write:{a.name}" for a in self.ATTRIBUTES if a.access == "rw"}
+                                   | {f"command:{c.name}" for c in self.COMMANDS}
+                                   | {f"operation:{o.name}" for o in self.OPERATIONS}),
             "attributes": [a.to_dict() for a in self.ATTRIBUTES],
             "commands": [c.to_dict() for c in self.COMMANDS],
             "operations": [c.to_dict() for c in self.OPERATIONS],

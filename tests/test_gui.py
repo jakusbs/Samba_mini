@@ -43,8 +43,18 @@ def test_samba_mini_runs_measurement(qapp, service, tmp_path, monkeypatch):
     w.trajectory.set_params("time", {"duration": 0.3, "interval": 0.05, "acq_time": 0.01, "time_const": 0.1,
                                      "position_stage": False})
     assert w.trajectory.estimate()[0] == 6
+    # Responsiveness: the GUI event loop must keep ticking while a run is active.
+    from PyQt6.QtCore import QTimer
+    ticks = []
+    timer = QTimer()
+    timer.setInterval(20)
+    timer.timeout.connect(lambda: ticks.append(time.perf_counter()))
+    timer.start()
     w.start_run()
     assert wait_until(qapp, lambda: w.engine is not None and w.engine.result is not None, 60)
+    timer.stop()
+    gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+    assert gaps and max(gaps) < 0.5, f"GUI blocked for {max(gaps):.2f} s"
     assert wait_until(qapp, lambda: w.start_btn.isEnabled(), 10)
     assert w.engine.result["status"] == "completed", w.engine.result
     assert os.path.exists(w.engine.result["path"])
