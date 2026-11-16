@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+.conda/
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# Machine-specific configuration, accounts, runtime state, logs
+# (they live in %LOCALAPPDATA%\SambaMini by default; these patterns catch
+# copies made inside the repository by mistake or by SAMBA_MINI_HOME=. setups)
+*.local.toml
+*.local.ini
+machine.toml
+accounts.sqlite3*
+*.sqlite3
+*.db
+state/
+logs/
+*.log
+.samba_mini_home/
+
+# Measurement data
+*.h5
+*.hdf5
+data/
+SambaMini Data/
+lab_notebook*.csv
+
+# Vendor binaries (redistribution not verified)
+*.dll
+libs/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# Interpreter chosen by install.bat (machine-specific)
+.install_config
