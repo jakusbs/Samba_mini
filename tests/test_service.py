@@ -220,3 +220,21 @@ def test_read_only_mode_refuses_control_and_writes(samba_home):
     finally:
         rs.stop()
     assert calls == []                                               # no cleanup writes at shutdown
+
+
+def test_manual_connect_results_are_logged(admin_client, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="Samba_controls.service.server")
+    admin_client.acquire_lease()
+    stage = admin_client.device("stage_polar")
+    assert stage.disconnect()["state"] == "OFF"
+    assert stage.connect()["state"] == "ON"
+    stage.reconnect()
+    with pytest.raises(ServiceError):
+        admin_client.device("no_such_device").connect()
+    lines = [r.getMessage() for r in caplog.records if r.name == "Samba_controls.service.server"]
+    who = "admin (pytest-admin)"
+    assert any(l.startswith(f"disconnect stage_polar by {who}: OFF") for l in lines)
+    assert any(l.startswith(f"connect stage_polar by {who}: ON") for l in lines)
+    assert any(l.startswith(f"reconnect stage_polar by {who}: ON") for l in lines)
+    assert any(l.startswith(f"connect no_such_device by {who} failed:") for l in lines)

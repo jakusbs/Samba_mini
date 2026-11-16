@@ -80,6 +80,9 @@ class TrinamicStage(StageBase):
             self._iface = ConnectionManager(args).connect()
         except Exception as exc:
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, f"TMCM-3212 not found: {exc}") from exc
+        port = getattr(getattr(self._iface, "_serial", None), "port", None)
+        if port:
+            self.identity["resource"] = str(port) if self.port.lower() != "auto" else f"{port} (auto)"
         try:
             for a in AXES:
                 ax = AXIS_INDEX[a]

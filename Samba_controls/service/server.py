@@ -288,9 +288,10 @@ class ServiceServer:
         m["device.read"] = ("auth", self._read)
         m["device.write"] = ("lease", self._write)
         m["device.command"] = ("auth", self._command)
-        m["device.connect"] = ("lease", lambda s, p, r: self.host.connect(_str(p, "device")))
+        m["device.connect"] = ("lease", lambda s, p, r: self._device_action(s, p, "connect", self.host.connect))
         m["device.disconnect"] = ("lease", self._disconnect)
-        m["device.reconnect"] = ("lease", lambda s, p, r: self.host.reconnect(_str(p, "device")))
+        m["device.reconnect"] = ("lease", lambda s, p, r: self._device_action(s, p, "reconnect",
+                                                                             self.host.reconnect))
         m["op.start"] = ("lease", self._op_start)
         m["op.pause"] = ("lease", lambda s, p, r: self._op_ctl(p, "pause"))
         m["op.resume"] = ("lease", lambda s, p, r: self._op_ctl(p, "resume"))
@@ -444,7 +445,25 @@ class ServiceServer:
     def _disconnect(self, s, p, r):
         if self.host.run_active or self.ops.active() is not None:
             raise ServiceError(ErrorCode.BUSY, "a measurement is running")
-        return self.host.disconnect(_str(p, "device"))
+        return self._device_action(s, p, "disconnect", self.host.disconnect)
+
+    def _device_action(self, s, p, action: str, fn) -> dict:
+        """Run a manual connect / disconnect / reconnect and log who asked and what came of it
+        (the automatic connection at start is logged as one summary line)."""
+        name = _str(p, "device")
+        who = f"{s.user['username']} ({s.client})"
+        try:
+            info = fn(name)
+        except ServiceError as exc:
+            log.warning("%s %s by %s failed: %s: %s", action, name, who, exc.code, exc.message)
+            raise
+        except Exception as exc:
+            log.warning("%s %s by %s failed: %s", action, name, who, exc)
+            raise
+        ident = info.get("identity") or {}
+        detail = ", ".join(f"{k} {ident[k]}" for k in ("model", "serial", "resource", "firmware") if ident.get(k))
+        log.info("%s %s by %s: %s%s", action, name, who, info.get("state"), f" ({detail})" if detail else "")
+        return info
 
     def _op_start(self, s, p, r) -> dict:
         dev = self.host.device(_str(p, "device"))

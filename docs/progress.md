@@ -31,13 +31,15 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   built-in defaults and found only the DAQ); it lists the MiniMoke folders on
   the PC, most recently used first, and saves the procedure presets after the
   next login.  Starting with a different mode than the running service now
-  says so.  On this PC `machine.toml` was created from
+  says so.  Manual *Connect* / *Disconnect* / *Reconnect* results (success
+  or failure, who asked, the polar stage's actual COM port) now go to
+  `service.log`.  On this PC `machine.toml` was created from
   `Documents\Minimoke-bugfixed` (mode real).
 
 ## Tests
 
-`scripts\run_tests.bat` → **61 passed** (≈60 s) on the measurement PC,
-simulation and fake drivers only.  Per area: service 14, engine 11, drivers
+`scripts\run_tests.bat` → **62 passed** (≈60 s) on the measurement PC,
+simulation and fake drivers only.  Per area: service 15, engine 11, drivers
 12, core 15, recovery 4, process 2, GUI 3.  See the README table for what each
 covers.
 

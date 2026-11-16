@@ -65,11 +65,11 @@ recovery: [docs/installation.md](docs/installation.md).
 
 ## Checks that passed
 
-Automated (`scripts\run_tests.bat`, 61 tests, ~60 s, no hardware touched):
+Automated (`scripts\run_tests.bat`, 62 tests, ~60 s, no hardware touched):
 
 | Area | What is verified |
 |---|---|
-| Service (14) | bootstrap/login, unauthenticated and lease-less requests rejected, backend limit checks, competing control rejected, timed point, field-sweep operation, pause/resume/abort, unavailable device → no fake data, lease expiry → abort + cleanup, stage moves, read-only diagnostics mode refuses control/writes/cleanup |
+| Service (15) | bootstrap/login, unauthenticated and lease-less requests rejected, backend limit checks, competing control rejected, timed point, field-sweep operation, pause/resume/abort, unavailable device → no fake data, lease expiry → abort + cleanup, stage moves, read-only diagnostics mode refuses control/writes/cleanup, manual connect/disconnect results logged with who asked |
 | Engine (11) | every workflow end to end through real sockets with HDF5 content/units/provenance checks; lock-in reading belongs to the current field point; Hall-probe speed validation as in MiniMoke; pause/resume/abort; auto-pause on a hardware fault then retry; refusal with a missing device; lease loss → `interrupted` |
 | Drivers (12) | real driver classes against fake `nidaqmx`/`pyvisa`/`pylablib`/`pytrinamic`/`clr`: channel order, PFI0 trigger, settle-sample discard, stale-acquisition rejection, 7270 socket framing, set acknowledgements, range rounding, reconnect, port 50001 fallback, stage conversions and signs, motor parameters, bounded waits, Hall filter and bounded zeroing, no connect-time writes in read-only mode, downloaded (Mark-of-the-Web) DLL refused with a clear message |
 | Core (15) | protocol safety (NaN/arrays, no object dtypes, version check, no arbitrary methods), late writes after timeout/abort never reach the driver, config migration with backup and malformed-file preservation, MiniMoke import leaves MiniMoke untouched and finds MiniMoke folders newest first, Argon2id hashes and profile persistence, logout/manual control blocked during a run, coordinated readbacks, crash-interrupted HDF5 file readable and marked partial, disk-error auto-pause without data loss, GUI processes never load drivers/PyQt5, core and service are Qt-free |
