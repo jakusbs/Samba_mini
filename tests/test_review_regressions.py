@@ -246,7 +246,7 @@ def test_engine_drains_all_pages_before_handling_final_state(admin_client, servi
 
 def test_lockin_settle_uses_applied_time_constant(admin_client, service, tmp_path, monkeypatch):
     requested = 0.11  # the simulated 7270, like the real driver, rounds this to 0.2 s
-    params = dict(b_min=0.0, b_max=0.1, b_step=0.1, sweep_freq=100.0,
+    params = dict(b_min=0.0, b_max=0.1, b_step=0.1, sweep_freq=10.0,
                   num_sweeps=1, x=0.0, y=0.0, position_stage=False,
                   **dict(FAST_LOCKIN, time_const=requested))
     moke = service.server.host.device("moke")

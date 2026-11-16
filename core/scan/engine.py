@@ -326,8 +326,7 @@ class ScanEngine:
             msg = plans.b_sweep_dc_validation(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"])
         elif self.wf.key == "b_sweep_lockin":
             msg = plans.b_sweep_lockin_validation(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"],
-                                                  (p["time_const"] if applied_time_constant_s is None
-                                          else applied_time_constant_s), p["acq_time"])
+                                                  p["time_const"], p["acq_time"])
         if msg:
             raise ServiceError(ErrorCode.INVALID_VALUE, msg)
         if self.req.setup not in ("longitudinal", "polar"):
@@ -535,7 +534,8 @@ class ScanEngine:
         if self.wf.key == "b_sweep_dc":
             return plans.b_sweep_dc_plan(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"])
         return plans.b_sweep_lockin_plan(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"],
-                                         p["time_const"], p["acq_time"])
+                                         (p["time_const"] if applied_time_constant_s is None
+                                          else applied_time_constant_s), p["acq_time"])
 
     def _position_points(self):
         p = self.params
