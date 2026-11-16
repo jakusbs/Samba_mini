@@ -12,7 +12,39 @@
 | Longitudinal stage | Thorlabs Kinesis / FTDI driver | Close the Kinesis GUI: it holds the motors |
 | Polar stage | Trinamic TMCM-3212 USB (TMCL) | Close TMCL-IDE |
 
-### Python environment
+### Installer (counterpart of Samba's `install.sh`)
+
+Double-click **`install.bat`** in the repository (or run
+`powershell -ExecutionPolicy Bypass -File scripts\install.ps1`).  It finds
+conda, creates/updates the **SambaMini** environment, checks the imports
+without opening any instrument, records the interpreter in `.install_config`
+(used by the `scripts\*.bat` launchers) and creates **Desktop** and **Start
+menu** shortcuts *Samba_mini* and *Samba_controls* (icons in `assets\`,
+derived from Samba's artwork with `scripts\make_icons.py`), plus a Start-menu
+*service console (diagnostics)* entry.  Options: `-SkipEnv` (shortcuts only),
+`-NoHardware`, `-NoDesktop`, `-Uninstall` (removes shortcuts and
+`.install_config`; environment, configuration, accounts and data are kept).
+The shortcuts start `pythonw.exe -m Samba_mini` / `-m Samba_controls` directly
+(no console window); each app has its own taskbar identity and icon.
+
+### Python environments on the MiniMOKE PC (inventory 2026-11-16)
+
+| Interpreter | Python | Used by | Notes |
+|---|---|---|---|
+| `%USERPROFILE%\miniconda3` (base) | 3.10.19 | first `python` on PATH | mixed: PyQt6 6.7, PyMeasure 0.14, drivers, PyInstaller; the frozen `Desktop\MiniMOKE\MiniMOKE.exe` (2023, bundles python310) was probably built here |
+| `miniconda3\envs\MOKE` | 3.11.15 | **MiniMoke** (all `scripts\*.bat` do `conda activate MOKE`; *Spyder (MOKE)* shortcut) | PyQt5, PyMeasure 0.15, drivers, zhinst |
+| `miniconda3\envs\MOKE_mfli` | 3.11.15 | MiniMoke MFLI variant (`Desktop\MiniMoke-main_mlfi`; *Spyder (MOKE_mfli)*) | same package set as MOKE |
+| `miniconda3\envs\SambaMini` | 3.11.18 | **Samba_mini / Samba_controls** (created by this project) | PyQt6 6.10, no PyQt5, drivers pinned to MOKE's versions |
+| `C:\ProgramData\miniconda3` | 3.13.11 | *Spyder* (all-users) shortcut | second, machine-wide Miniconda; no instrument drivers |
+| `AppData\Local\spyder-6`, `C:\ProgramData\spyder-6` (each base + `spyder-runtime`) | 3.11 / 3.12 | standalone Spyder 6 installers | IDE runtimes only |
+| `AppData\Local\Microsoft\WindowsApps\python.exe` | — | — | Microsoft Store alias (second `python` on PATH) |
+
+Because the first `python` on PATH is the miniconda **base** environment,
+nothing in Samba_mini relies on PATH: the shortcuts, launchers and the service
+child process always use the SambaMini interpreter explicitly.  The installer
+only adds/updates SambaMini and never changes MOKE, MOKE_mfli or base.
+
+### Python environment (details)
 
 `scripts\setup_env.ps1` creates the conda environment **SambaMini** (Python
 3.11) next to MiniMoke's `MOKE` environment without touching it:

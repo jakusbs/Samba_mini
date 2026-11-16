@@ -48,3 +48,6 @@ libs/
 *.swp
 Thumbs.db
 desktop.ini
+
+# Interpreter chosen by install.bat (machine-specific)
+.install_config

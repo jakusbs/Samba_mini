@@ -20,6 +20,13 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
 3.11.2, h5py 3.16.0, pyzmq 27.3.0, argon2-cffi 25.1.0, nidaqmx 1.4.1, PyVISA
 1.16.2, pythonnet 3.0.5, pylablib 1.4.5 (no PyQt5), pytrinamic 0.2.23.
 
+* 2026-11-16 — Windows installer `install.bat` / `scripts\install.ps1`
+  (environment, launcher config, Desktop + Start-menu shortcuts, uninstall);
+  tested into temporary folders (install and uninstall), then run on this PC
+  with `-SkipEnv`: Desktop shortcuts *Samba_mini* and *Samba_controls* and the
+  Start-menu folder *Samba_mini* exist.  Python environments inventoried
+  (docs/installation.md).
+
 ## Tests
 
 `scripts\run_tests.bat` → **59 passed** (≈60 s) on the measurement PC,
@@ -110,8 +117,8 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
 
 * Server copies of data files and the server lab notebook (MiniMoke's
   `\\d.ethz.ch\...` archive) are not implemented; data stay local.
-* No application icon (Samba's artwork carries ETH/author branding and was
-  not copied).
+* Application icons are derived from Samba's dancer artwork (same lab) with a
+  badge per app (`scripts\make_icons.py`); replace `assets\*.ico` to rebrand.
 * The data browser's Kerr (λ/2) display needs a BD calibration, which
   MiniMoke workflows do not produce; the pill stays disabled.
 * Machine configuration is edited as a file (Samba_controls shows it and

@@ -35,26 +35,23 @@ Not yet validated on the real instruments** — see
 
 ## Quick start
 
-1. Create the environment (Python 3.11, separate from MiniMoke's `MOKE` env):
+1. Run the installer (the Windows counterpart of Samba's `install.sh`): it
+   creates the Python 3.11 environment **SambaMini** next to MiniMoke's `MOKE`
+   environment and puts **Samba_mini** and **Samba_controls** shortcuts on the
+   Desktop and in the Start menu.
 
    ```bash
-   powershell -ExecutionPolicy Bypass -File scripts\setup_env.ps1
+   install.bat
    ```
 
-2. Start **Samba_controls** — it starts the device service.  With no
-   configuration it runs in **simulation** mode.  The first start asks you to
-   create the administrator account.
+2. Start **Samba_controls** (desktop icon) — it starts the device service.
+   With no configuration it runs in **simulation** mode.  The first start asks
+   you to create the administrator account.
 
-   ```bash
-   scripts\Samba_controls.bat
-   ```
+3. Start **Samba_mini** (desktop icon), log in, pick a workflow in the
+   *Trajectory* tab and press Start.
 
-3. Start **Samba_mini**, log in, pick a workflow in the *Trajectory* tab and
-   press Start.
-
-   ```bash
-   scripts\Samba_mini.bat
-   ```
+Without shortcuts: `scripts\Samba_controls.bat`, `scripts\Samba_mini.bat`.
 
 To drive the real setup, import the MiniMoke settings (Samba_controls →
 *Machine configuration* → *Import MiniMoke settings…*, choose mode *real*)
