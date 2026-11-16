@@ -14,7 +14,7 @@ pushed to `jakusbs/Samba_mini`.  Not merged.
 | 5 Samba_controls UI | done — service lifecycle, device table/detail, manual commands, users, configuration import |
 | 6 Real drivers | written and tested against fake vendor libraries; **not run on the instruments** |
 | 7 Hardening and documentation | done — recovery tests, launchers, installation/troubleshooting |
-| 8 Hardware validation | **not started — needs the lab's authorisation** |
+| 8 Hardware validation | read-only connection check done for DAQ, 7270 and Kinesis stage; the rest pending |
 
 Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
 3.11.2, h5py 3.16.0, pyzmq 27.3.0, argon2-cffi 25.1.0, nidaqmx 1.4.1, PyVISA
@@ -22,9 +22,9 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
 
 ## Tests
 
-`scripts\run_tests.bat` → **55 passed** (≈60 s) on the measurement PC,
-simulation and fake drivers only.  Per area: service 13, engine 11, drivers
-10, core 13, recovery 4, process 2, GUI 2.  See the README table for what each
+`scripts\run_tests.bat` → **57 passed** (≈60 s) on the measurement PC,
+simulation and fake drivers only.  Per area: service 14, engine 11, drivers
+11, core 13, recovery 4, process 2, GUI 2.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
@@ -33,17 +33,33 @@ batch launcher and both module entry points started as real processes against
 an isolated temporary home and shut down cleanly; the MiniMoke importer read
 `Documents\Minimoke-bugfixed` correctly in a dry run (nothing written there).
 
+## Hardware checks done
+
+**2026-11-16 14:29 — read-only connection check (authorised by the user).**
+Service started with `--read-only` (control, writes, mutating commands and
+cleanup writes refused; no connect-time configuration writes) from an
+isolated temporary home whose `machine.toml` was imported from
+`Documents\Minimoke-bugfixed`.  Hall probe excluded because Magnet-Physik's
+*USB Teslameter* application was running; polar stage excluded (its connect
+writes motor currents).  MiniMoke, Kinesis GUI and TMCL-IDE were not running.
+
+| Device | Result |
+|---|---|
+| NI-DAQ | ON — USB-6259 (BNC), serial 21136571, `Dev1`; tasks, channels and PFI0 triggers created; no acquisition, no output written (coil command reported as unknown) |
+| Ametek 7270 | ON — `7270` firmware 2.11 at `TCPIP0::192.168.77.2::50000::SOCKET`; framing probe found 1 extra status chunk per response (socket framing, as MiniMoke documented); readback REFMODE 0, OA 0 V, SEN 1 mV, OF 8957 Hz, TC 0.2 s, REFP 0°; `XY.` = −1.375e−4 V, +1.720e−4 V (identical in three reads ~1 s apart: plausible at OA 0 V with the 7270's 4-digit replies; recheck in item 5); session closed at shutdown |
+| Kinesis stage | ON — motors 80855672/80855670/80855667 opened; not moving; with the imported offsets x = −0.0250 mm, y = −0.0087 mm, z = 0.0000 mm; backlash setting left unchanged |
+| Refusals | `lease.acquire` and `daq.zero_outputs` → FORBIDDEN |
+| Shutdown | exit code 0; "read-only mode: shutdown cleanup skipped" |
+
 ## Remaining hardware checks
 
 Each needs the instruments; ask the lab before anything that moves or
 energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
 
-1. **Read-only connection** (service in real mode): NI device `Dev1` opens;
-   7270 answers `ID`/`VER` over Ethernet and the framing probe reports one
-   extra chunk; Hall DLL loads in the SambaMini env and reads a field; Kinesis
-   motors open and report positions consistent with the imported offsets.
-   Note: connecting the TMCM-3212 writes MiniMoke's motor-current and
-   StealthChop parameters (as MiniMoke does at start-up) — treat as energising.
+1. **Read-only connection, remainder:** Hall probe (close the *USB Teslameter*
+   application first; `--read-only` reads Speed/Filter without writing them)
+   and the polar stage (its connect writes MiniMoke's motor-current and
+   StealthChop parameters — treat as energising; not possible read-only).
 2. **Hall probe threading/COM:** MiniMoke called
    `pythoncom.CoInitializeEx(APARTMENTTHREADED)` at start-up without saying
    why; the service loads the DLL in a worker thread without it (pywin32 is
@@ -83,6 +99,6 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
 
 ## Next step
 
-Phase 8, item 1: with the lab's go-ahead, start the service in real mode with
-`scripts\service_console.bat --mode real` after importing the MiniMoke
-settings, and record the connection results and identities here.
+Phase 8, item 1 remainder: close the *USB Teslameter* app and run
+`scripts\service_console.bat --mode real --read-only` to check the Hall
+probe; then, with the lab's go-ahead, items 2–9 (these write outputs or move).
