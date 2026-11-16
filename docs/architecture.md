@@ -102,6 +102,13 @@ Magnet-Physik, not redistributed here).
 | Samba `core/plot_interact.py`, `plot_widgets.py`, `kerr.py` | `core/plot_interact.py`, `core/plot_widgets.py`, `core/kerr.py` | copied; bare imports → package imports, config constants from `core/plot_config.py` |
 | Samba `core/data_browser.py`, `scan_index.py` | same names in `core/` | copied; package imports; search index in `%LOCALAPPDATA%\SambaMini\state`; sub-group channels (averaged loop, XY repeats) added |
 | Samba `panels/config_list.py`, `_widgets.py` (NoScroll widgets) | `Samba_mini/panels/config_list.py`, `widgets.py` | adapted; configurations stored per user in the service's account database |
+| Samba `panels/trajectory.py` (scan-type pills, ActuatorGroup, field sub-modes, field monitor, Timing), `core/nstep.py` | `Samba_mini/panels/trajectory.py`, `widgets.py` | same arrangement: Spatial (X/Y axis boxes; none ticked = time scan) and Field (Lock-in / DC B-sweep side by side); maps onto the six MiniMoke workflows without changing their parameters; N↔step coupling uses MiniMoke's point rule |
+| Samba `_widgets.py` MokeMetadataGroup | `Samba_mini/panels/metadata.py` | same fields and keys; incidence replaces the PMOKE/LMOKE buttons (polar ⇒ PMOKE) |
+| Samba `panels/hardware_panel.py` | `Samba_mini/panels/hardware.py` | Lock-in (7270) / Field / Detectors instead of Lock-in / Current Source / Field & Relay; lock-in values are per measurement (MiniMoke) |
+| Samba `core/calibration.py` stage group | `Samba_mini/panels/calibration.py` | Calibration tab with stage positioning; no autofocus/LEDs |
+| Samba `panels/right_panel.py`, `sensor_picker.py` | `Samba_mini/panels/right_panel.py` | same rows; the checkbox only plots (every MiniMoke channel is recorded) |
+| Samba `panels/scanlist.py`, `ScanlistWorker`, `core/polarity.py` | `Samba_mini/panels/scanlist.py`, `core/polarity.py` (copied), scanlist loop in `Samba_mini/app.py` | N scans of the Trajectory measurement, field flip AB/ABBA by reversing the coil command; Samba's `.txt` (path, relay_sign, field_T); no relay flip, current sweep or refocus |
+| Samba `core/bd_calibration.py`, `core/bd_fit.py` | `Samba_mini/panels/bd_calibration.py`, `core/bd_fit.py` (copied) | values per user and setup in the account database; `/data/calibration` in every new file; fit accepts `dc_signal` and `_SIM` names |
 | Samba `samba.py` layout | `Samba_mini/app.py` | layout reproduced, code rewritten (no god object) |
 | Samba runner HDF5 writer (`_open_hdf5`, `_write_point`, `_finalize_hdf5`) | `core/storage/hdf5_writer.py` | re-implemented with the same schema; no `hw_*`/TANGO fields |
 | Samba `ScanWorker`/runner control flags | `core/scan/engine.py` | re-implemented Qt-free with an explicit state machine |
@@ -114,8 +121,11 @@ Magnet-Physik, not redistributed here).
 | MiniMoke `data_archive.py` lab notebook | `core/storage/lab_notebook.py` | CSV row per run, same columns (+ user, mode, file status) |
 
 Not ported: Samba `hardware.py` SimProxy, `setup_lock.py`, TANGO panels,
-DC-hysteresis/PLC/Beckhoff, Zurich, SmarAct, Cryo, DG645, scanlists;
-MiniMoke PyMeasure UI and global initialisation, Zurich MFLI.
+DC-hysteresis/PLC/Beckhoff, Zurich, SmarAct, Cryo, DG645, relay flip,
+current sweep, autofocus/refocus, LEDs, script console, NAS server sync;
+Samba's Device Registry and Setup Defaults (hardware configuration belongs
+to Samba_controls here); MiniMoke PyMeasure UI and global initialisation,
+Zurich MFLI.
 
 ## 3. Architecture
 
