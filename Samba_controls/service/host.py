@@ -5,10 +5,12 @@ Monitoring
 ----------
 A monitor thread polls each idle physical device's ``MONITORED`` attributes.
 It never queues behind real work: it skips a device whose worker is busy or has
-a backlog, and it is suspended completely while a measurement run is active
-(``run_active``).  During a run, reads are answered from the values the
-acquisition itself stored (``source = "acquisition"``/``"cache"``), so a
-monitoring client never races the acquisition driver.
+a backlog, and it leaves the devices of an active measurement run alone.  During
+a run, reads of those devices are answered from the values the acquisition
+itself stored (``source = "acquisition"``/``"cache"``), so a monitoring client
+never races the acquisition driver.  Devices the run did not declare
+(``run.begin(required_devices=...)``) stay free: e.g. the stage during a time
+scan, so it can be moved to focus while the signal is recorded.
 """
 
 from __future__ import annotations
@@ -84,6 +86,7 @@ class DeviceHost:
         self.publish = publish or (lambda topic, body: None)
         self.run_active = False
         self.run_info: dict | None = None
+        self.run_devices: set[str] | None = None     # declared by the run; None = all locked
         self._last_poll: dict[tuple[str, str], float] = {}
         self._stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
@@ -200,7 +203,7 @@ class DeviceHost:
         for attr in attrs:
             if attr not in d.attributes:
                 raise ServiceError(ErrorCode.UNKNOWN_ATTRIBUTE, f"{name} has no attribute {attr!r}")
-            if d.PHYSICAL and (self.run_active or self._workers[name].busy):
+            if d.PHYSICAL and (self.locked(name) or self._workers[name].busy):
                 # Coordinated readback: never interleave with the acquisition.
                 out[attr] = d.cached(attr).to_dict()
                 continue
@@ -255,11 +258,9 @@ class DeviceHost:
     def start_monitor(self, period_s: float = 0.25) -> None:
         def loop():
             while not self._stop.wait(period_s):
-                if self.run_active:
-                    continue
                 now = time.monotonic()
                 for name, d in list(self._devices.items()):
-                    if not d.PHYSICAL or not d.usable or not d.MONITORED:
+                    if not d.PHYSICAL or not d.usable or not d.MONITORED or self.locked(name):
                         continue
                     w = self._workers[name]
                     if w.busy or w.backlog:
@@ -274,8 +275,12 @@ class DeviceHost:
         self._monitor_thread = threading.Thread(target=loop, name="monitor", daemon=True)
         self._monitor_thread.start()
 
+    def locked(self, name: str) -> bool:
+        """True while a run uses this device (all devices if the run declared none)."""
+        return self.run_active and (self.run_devices is None or name in self.run_devices)
+
     def _monitor_read(self, d: Device, attr: str) -> None:
-        if self.run_active:
+        if self.locked(d.name):
             return
         try:
             d.read_attribute(attr)

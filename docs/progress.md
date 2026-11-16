@@ -98,12 +98,20 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   0.202 s/point, longest gap 0.288 s, no gap over 1 s (the same scan on the
   old service at 20:46:53: two 2.16 s gaps in 80 points).  The service log
   counted 10 missing status chunks within the first ~35 s.
+* 2026-11-16 — **Focusing during the calibration scan.**  The service now
+  locks only the devices a run declares (`run.begin(required_devices)`):
+  commands to them are refused, their reads come from the run, the monitor
+  leaves them alone.  The calibration time scan (and any time scan without
+  stage positioning) does not use the stage, so the digit jog stays usable
+  and its position stays live while the signal is recorded; runs that move
+  the stage (X/Y-sweeps, XY maps, "go to x, y first") still lock it.  Tested
+  in simulation only.
 
 ## Tests
 
-`scripts\run_tests.bat` → **76 passed** (≈80 s) on the measurement PC,
-simulation and fake drivers only.  Per area: service 15, engine 13, drivers
-14, core 16, recovery 4, process 2, GUI 12.  See the README table for what each
+`scripts\run_tests.bat` → **78 passed** (≈85 s) on the measurement PC,
+simulation and fake drivers only.  Per area: service 16, engine 13, drivers
+14, core 16, recovery 4, process 2, GUI 13.  See the README table for what each
 covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,

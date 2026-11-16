@@ -462,3 +462,44 @@ def test_calibration_tab_measures_only_on_start(qapp, service, tmp_path):
     assert json.loads(meta["params_json"])["position_stage"] is False and bool(meta["calibration_scan"])
     assert len(w.calibration.plot.data["dc_signal"]) == 6
     w.close()
+
+
+def test_stage_can_be_moved_during_a_calibration_scan(qapp, service, tmp_path):
+    """Focusing: during the calibration time scan the stage jog stays usable (the scan does not
+    use the stage); during an X-sweep, which moves the stage, it is locked."""
+    from core.gui.bridge import ServiceBridge
+    from Samba_mini.app import MainWindow
+
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    w.show()
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    w.dir_edit.setText(str(tmp_path / "data"))
+    jx = w.calibration.jogs["x"]
+    assert wait_until(qapp, lambda: jx._pos is not None, 20)
+    start = jx._pos
+    w.live_tabs.setCurrentWidget(w.calibration)
+    w.calibration.timescan.load({"n": 80, "interval": 0.05, "acq_time": 0.01})
+    w.trajectory.set_params("time", {"time_const": 0.1, "volt": 0.0})
+    w.start_run()
+    assert w._calib_run and w.calibration.stage_box.isEnabled()
+    assert wait_until(qapp, lambda: w._progress[0] >= 5, 30)
+    jx._buttons[2 * 1].click()                                        # ▲ 1 mm while the scan runs
+    assert wait_until(qapp, lambda: abs(jx._pos - (start + 1.0)) < 1e-4, 30)
+    assert w._calib_run, "the jog must not end the scan"
+    assert wait_until(qapp, lambda: not w._calib_run, 60)
+    assert w.engine.result["status"] == "completed"
+    # an X-sweep moves the stage itself: the controls are locked while it runs
+    w.live_tabs.setCurrentWidget(w.plot1d)
+    w.trajectory.set_workflow("x_sweep")
+    w.trajectory.set_params("x_sweep", {"x_min": 0, "x_max": 30, "x_step": 10, "acq_time": 0.01,
+                                        "time_const": 0.1})
+    w.start_run()
+    assert not w.calibration.stage_box.isEnabled()
+    w.abort_run()
+    assert wait_until(qapp, lambda: w.start_btn.isEnabled(), 60)      # the window has handled the end
+    assert w.calibration.stage_box.isEnabled()
+    w.close()

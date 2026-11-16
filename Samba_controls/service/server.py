@@ -236,6 +236,7 @@ class ServiceServer:
         problems += self.host.cleanup_all(self.cfg.data.get("cleanup"))
         self.host.run_active = False
         self.host.run_info = None
+        self.host.run_devices = None
         report = {"ok": stopped and not problems, "stopped": stopped, "problems": problems}
         if problems:
             log.error("reconcile (%s): %s", reason, problems)
@@ -437,10 +438,15 @@ class ServiceServer:
         return self.host.command(dev.name, name, p.get("args") or {}, ctx)
 
     def _refuse_during_run(self, device: str | None, allow_stop: bool = False) -> None:
-        if allow_stop:
+        """While an operation runs, refuse commands to the devices it uses.  A device the active
+        run did not declare (e.g. the stage during a time scan without stage positioning) stays
+        usable — still only by the lease holder."""
+        if allow_stop or self.ops.active() is None:
             return
-        if self.ops.active() is not None:
-            raise ServiceError(ErrorCode.BUSY, f"an operation is running; {device} is in use")
+        h = self.host
+        if device and h.run_active and h.run_devices is not None and device not in h.run_devices:
+            return
+        raise ServiceError(ErrorCode.BUSY, f"a measurement is running and uses {device}")
 
     def _disconnect(self, s, p, r):
         if self.host.run_active or self.ops.active() is not None:
@@ -502,9 +508,11 @@ class ServiceServer:
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE,
                                "required devices are not available: " + "; ".join(missing),
                                {"missing": missing})
+        self.host.run_devices = {str(n) for n in required} if required else None
         self.host.run_active = True
         self.host.run_info = {"user": s.user["username"], "workflow": p.get("workflow"),
-                              "started": time.time(), "file": p.get("file")}
+                              "started": time.time(), "file": p.get("file"),
+                              "devices": sorted(self.host.run_devices) if self.host.run_devices else None}
         self.publish("server", self.status_public())
         return {"run_active": True, "mode": self.cfg.mode}
 
@@ -516,6 +524,7 @@ class ServiceServer:
             problems = self.host.cleanup_all(self.cfg.data.get("cleanup"))
         self.host.run_active = False
         self.host.run_info = None
+        self.host.run_devices = None
         self.publish("server", self.status_public())
         return {"run_active": False, "cleanup_problems": problems}
 

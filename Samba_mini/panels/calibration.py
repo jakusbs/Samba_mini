@@ -389,9 +389,14 @@ class CalibrationPanel(QWidget):
     def add_point(self, t: float, rec: dict) -> None:
         self.plot.add(t, rec)
 
-    def set_stage_enabled(self, enabled: bool) -> None:
-        """During a measurement the stage belongs to the run; the plot stays live."""
+    def set_stage_enabled(self, enabled: bool, during_run: bool = False) -> None:
+        """A run that uses the stage owns it (the controls are greyed); one that does not, such
+        as the calibration time scan, leaves it free so it can be moved to focus meanwhile."""
         self.stage_box.setEnabled(enabled)
+        title = f"Stage positioning · {STAGE_TITLES.get(self._setup(), self._setup())}"
+        if during_run:
+            title += " — free during this scan" if enabled else " — in use by the measurement"
+        self.stage_box.setTitle(title)
 
     # ------------------------------------------------------------------
     def _stage(self) -> str:
