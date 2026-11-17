@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow, QMe
 from core.config import machine
 from core.gui.bridge import ServiceBridge, call_async, error_text
 from core.gui.login import LoginDialog
+from core.gui.outputs import ask_keep_outputs
 from core.protocol import ServiceError
 from core.theme import app_style
 from core.version import __version__
@@ -320,9 +321,12 @@ class ControlsWindow(QMainWindow):
     def _login_logout(self) -> None:
         c = self.bridge.client
         if c.session:
+            keep = ask_keep_outputs(self, c) if c.lease_holder else []
+            if keep is None:
+                return
             try:
                 if c.lease_holder:
-                    c.release_lease()
+                    c.release_lease(keep_outputs=keep)
                 c.logout()
             except ServiceError as exc:
                 QMessageBox.warning(self, "Log out", error_text(exc))
@@ -343,7 +347,10 @@ class ControlsWindow(QMainWindow):
             return
         try:
             if c.lease_holder:
-                c.release_lease()
+                keep = ask_keep_outputs(self, c)
+                if keep is None:
+                    return
+                c.release_lease(keep_outputs=keep)
             else:
                 c.acquire_lease()
         except ServiceError as exc:
@@ -484,10 +491,15 @@ class ControlsWindow(QMainWindow):
                 ev.ignore()
                 return
         c = self.bridge.client
+        keep = (ask_keep_outputs(self, c) if c.session and c.lease_holder and self.bridge.probe(0.5) is not None
+                else [])
+        if keep is None:
+            ev.ignore()
+            return
         try:
             if c.session:
                 if c.lease_holder:
-                    c.release_lease()
+                    c.release_lease(keep_outputs=keep)
                 c.logout()
         except ServiceError:
             pass

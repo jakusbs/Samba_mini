@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 #: Capabilities announced in ``server.hello`` (see core.client.ServiceClient.has_feature).
 SERVICE_FEATURES = ("calibration-records-1", "presets-atomic-1", "device-config-1", "startup-lights-1",
-                    "channels-1")
+                    "channels-1", "coil-keep-1", "manual-lockin-1")
 
 
 class ServiceServer:
@@ -60,6 +60,8 @@ class ServiceServer:
         self._ctx = zmq.Context()
         self._tls = threading.local()
         self._control_lock = threading.RLock()
+        self._release_lock = threading.Lock()        # one holder release at a time (keep_outputs)
+        self._release_keep: set[str] = set()
         self._inflight: dict[str, set[str]] = {}
         self._stop = threading.Event()
         self._shutdown_reason = ""
@@ -245,7 +247,14 @@ class ServiceServer:
         problems = []
         if not stopped:
             problems.append(f"an operation did not stop within {wait_s} s")
-        problems += self.host.cleanup_all(self.cfg.data.get("cleanup"))
+        cleanup = dict(self.cfg.data.get("cleanup") or {})
+        if reason == "released by holder":           # the holder may leave the coil / lock-in on
+            keep = set(self._release_keep)
+            if "coil" in keep:
+                cleanup["zero_coil"] = False
+            if "lockin" in keep:
+                cleanup["lockin_output_off"] = False
+        problems += self.host.cleanup_all(cleanup)
         self.host.run_active = False
         self.host.run_info = None
         self.host.run_devices = None
@@ -485,9 +494,23 @@ class ServiceServer:
         return {"lease_holder": holder, "lease": self.lease.status(), "instance_id": self.instance_id}
 
     def _lease_release(self, s, p, r) -> dict:
+        """Release control.  ``keep_outputs`` ("coil", "lockin"): the holder chose to leave these
+        running with nobody in control (Samba_mini / Samba_controls ask first); everything else is
+        cleaned up as configured."""
         if self.host.run_active and not p.get("force"):
             raise ServiceError(ErrorCode.BUSY, "end the measurement run first")
-        return self.lease.release(s.token, "released by holder", wait=True)
+        keep = p.get("keep_outputs") or []
+        if not isinstance(keep, list) or any(k not in ("coil", "lockin") for k in keep):
+            raise ServiceError(ErrorCode.BAD_REQUEST, "keep_outputs: a list of 'coil' and/or 'lockin'")
+        with self._release_lock:
+            self._release_keep = set(keep)
+            try:
+                st = self.lease.release(s.token, "released by holder", wait=True)
+            finally:
+                self._release_keep = set()
+        if keep:
+            log.warning("control released by %s leaving %s running", s.user["username"], " and ".join(keep))
+        return st
 
     def _read(self, s, p, r) -> dict:
         attrs = p.get("attrs")
@@ -670,7 +693,13 @@ class ServiceServer:
         self.host.run_cancel.cancel("run ended")
         problems = []
         if p.get("cleanup", True):
-            problems = self.host.cleanup_all(self.cfg.data.get("cleanup"))
+            # Measurements never change the lock-in (only "Apply now" does), so they never switch it
+            # off; the coil keeps running unless cleanup.coil_after_run = "zero".
+            cleanup = dict(self.cfg.data.get("cleanup") or {})
+            cleanup["lockin_output_off"] = False
+            if cleanup.get("coil_after_run", "keep") == "keep":
+                cleanup["zero_coil"] = False
+            problems = self.host.cleanup_all(cleanup)
         if problems:
             self.lease.release(s.token, "run cleanup failed", wait=False)
             return {"run_active": True, "cleanup_problems": problems}

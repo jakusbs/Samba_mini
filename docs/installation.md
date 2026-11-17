@@ -117,9 +117,17 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
 * **Heartbeat:** a client that stops answering for `lease_ttl_s` (15 s) loses
   control; the service aborts its operation and runs the cleanup before anyone
   else can take control.
-* **Cleanup** (end of run, abort, lost client, service stop): coil command
-  0 V, lock-in oscillator 0 V (`OA. 0`), stages stopped where they are.  This
-  is what MiniMoke did; nothing is ramped.
+* **Lock-in:** set it with *Apply now* (Hardware box) or in Samba_controls;
+  measurements read it as it is set and never change or switch it off.
+* **Coil:** keeps running between measurements (a field sweep returns to the
+  value it started from); *Zero outputs* switches it off.  The status bar shows
+  "Coil: … V ON" while it is on.  `[cleanup] coil_after_run = "zero"` in
+  machine.toml restores MiniMoke's 0 V after every measurement.
+* **Releasing control / closing** with the coil or the lock-in oscillator on
+  asks whether to leave them on (with nobody in control) or switch them off.
+* **Cleanup when control is lost** (client gone, forced release) and at
+  service stop: coil command 0 V, lock-in oscillator 0 V (`OA. 0`), stages
+  stopped where they are.  Nothing is ramped (as MiniMoke).
 * **Pause** holds after the current point with field, outputs and position
   unchanged.  A hardware error or a failed file write pauses automatically;
   *Resume* retries the same point.

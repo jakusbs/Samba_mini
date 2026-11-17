@@ -128,6 +128,9 @@ class ScanEngine:
         self._t_start = 0.0
         self._last_xy_um: tuple[float, float] = (math.nan, math.nan)
         self.mode = "unknown"
+        self._lockin_settings: dict | None = None     # the lock-in as it is set (read, never changed)
+        self._coil_before = math.nan                 # coil command before the run (field sweeps return to it)
+        self._coil_after_run = "keep"
         self._resolve_channels()
 
     # ================================================================ channels
@@ -341,6 +344,9 @@ class ScanEngine:
                 raise ServiceError(ErrorCode.INVALID_VALUE, "no channel to measure: tick at least one")
             if self.skipped_channels:
                 self._log("warning", "not measured by this measurement: " + ", ".join(self.skipped_channels))
+            if not self.read_lockin and "lockin" in required:
+                required.remove("lockin")              # no lock-in channel ticked: the lock-in is not used
+            self._read_before_run()
             run = self._begin_run(required)
             self.client = self.client.for_run(run["run_id"])
             began = True
@@ -379,12 +385,13 @@ class ScanEngine:
                 self._log("info", "Not returning to the start position: the run was stopped.")
             except Exception as exc:  # noqa: BLE001
                 self._log("warning", f"could not return to the start position: {exc}")
+            coil_problems = self._coil_after()
             try:
                 self.client.hello(3.0)
                 res = self.client.call("run.end", {"cleanup": True}, 60.0)
-                cleanup_problems = res.get("cleanup_problems", [])
+                cleanup_problems = coil_problems + res.get("cleanup_problems", [])
             except ServiceError as exc:
-                cleanup_problems = [f"cleanup not confirmed: {exc.message}"]
+                cleanup_problems = coil_problems + [f"cleanup not confirmed: {exc.message}"]
         elif status == "interrupted":
             cleanup_problems = ["cleanup not confirmed: the service performs it when the lease expires"]
         for p in cleanup_problems:
@@ -568,6 +575,10 @@ class ScanEngine:
             "service_instance": self.client.instance_id or "",
             "run_id": new_id(),
             "channels_json": self.channels_record(),
+            "lockin_settings_json": (dict(self._lockin_settings, note="read at run start; Samba_mini "
+                                          "measurements do not change the lock-in")
+                                     if self._lockin_settings is not None else {"used": False}),
+            "coil_before_run_V": self._coil_before,
         }
         rec = self.req.bd_calibration_record
         cal_vals = [float(v) for v in (self.req.bd_calibration or [])]
@@ -671,16 +682,73 @@ class ScanEngine:
         self._last_xy_um = (res["x_mm"] * UM_PER_MM, res["y_mm"] * UM_PER_MM)
         return self._last_xy_um
 
-    def _configure_lockin(self) -> dict:
+    #: lock-in settings read at run start, and the workflow parameter each corresponds to
+    LOCKIN_SETTINGS = {"oscillator_V": "volt", "sensitivity_V": "sensi", "frequency_Hz": "lockin_freq",
+                       "time_constant_s": "time_const", "phase_deg": "phase", "reference_mode": None}
+
+    def _read_before_run(self) -> None:
+        """Before the run claims its devices (afterwards their reads come from the run's cache):
+        how the lock-in is set -- measurements never change it, only "Apply now" does -- and the
+        coil command a field sweep returns to."""
+        self._check()                              # aborted before the run began: touch nothing
+        if self.client.has_feature("coil-keep-1"):
+            try:
+                snap = self.client.call("config.get", {}, 10.0).get("data") or {}
+                self._coil_after_run = str((snap.get("cleanup") or {}).get("coil_after_run", "keep"))
+            except ServiceError:
+                self._coil_after_run = "keep"
+        else:
+            self._coil_after_run = "zero"              # an older service zeroes the coil at run end
+        try:
+            r = self.client.device("daq").read("coil_command_V", timeout_s=10.0)["coil_command_V"]
+            self._coil_before = float(r.value) if r.valid and r.value is not None else math.nan
+        except (ServiceError, TypeError, ValueError):
+            self._coil_before = math.nan
+        if not self.read_lockin:
+            self._lockin_settings = None
+            return
+        try:
+            got = self.client.device("lockin").read(*self.LOCKIN_SETTINGS, timeout_s=15.0)
+        except ServiceError as exc:
+            raise ServiceError(exc.code, f"lock-in settings could not be read: {exc.message}") from None
+        self._lockin_settings = {k: (r.value if r.valid else None) for k, r in got.items()}
         p = self.params
-        applied = self._rpc(lambda: self._dev("lockin").command(
-            "configure", volt=p["volt"], sensi=p["sensi"], freq=p["lockin_freq"], time_const=p["time_const"],
-            phase=p["phase"]), "lock-in configure")
-        self._log("info", "Lock-in configured (single reference): " + ", ".join(
-            f"{k}={v:g}" for k, v in applied.items() if isinstance(v, (int, float))))
+        differ = []
+        for key, param in self.LOCKIN_SETTINGS.items():
+            v = self._lockin_settings.get(key)
+            if param and param in p and isinstance(v, (int, float)) and not math.isclose(
+                    float(v), float(p[param]), rel_tol=0.02, abs_tol=1e-12):
+                differ.append(f"{key} {v:g} (Hardware box {p[param]:g})")
+        if differ:
+            self._log("warning", "The lock-in is measured as it is set now (runs do not change it): "
+                      + ", ".join(differ) + ". Use Apply now in the Hardware box to change it.")
+
+    def _lockin_time_constant(self) -> float | None:
+        tc = (self._lockin_settings or {}).get("time_constant_s")
+        return float(tc) if isinstance(tc, (int, float)) and tc > 0 else None
+
+    def _coil_after(self) -> list[str]:
+        """The coil keeps running after a measurement ("keep", the default): a field sweep returns to
+        the value it started from, other measurements leave their coil command (the Hardware box
+        value).  With "zero" the service sets 0 V in run.end."""
+        if self._coil_after_run != "keep":
+            return []
+        if self.wf.key in ("b_sweep_dc", "b_sweep_lockin"):
+            target = self._coil_before if math.isfinite(self._coil_before) else 0.0
+        else:
+            target = float(self.params.get("b", 0.0))
+        try:
+            self._rpc(lambda: self._dev("daq").command("set_outputs", coil_V=target), "coil after run")
+        except (ServiceError, Abort, Interrupted) as exc:
+            return [f"coil not set to {target:+.4g} V after the run: {getattr(exc, 'message', exc)}"]
+        self._log("info", f"Coil command left at {target:+.4g} V (it keeps running; Zero outputs switches "
+                  "it off)")
         if self._writer:
-            self._writer.set_metadata(lockin_applied_json=applied)
-        return applied
+            try:
+                self._writer.set_metadata(coil_after_run_V=target)
+            except StorageError:
+                pass
+        return []
 
     def _prepare_hall(self, integration_s: float) -> None:
         res = self._rpc(lambda: self._dev("moke").command("prepare", hall_integration_s=integration_s), "hall")
@@ -776,8 +844,13 @@ class ScanEngine:
     def _run_b_sweep(self) -> None:
         p = self.params
         lockin = self.wf.key == "b_sweep_lockin"
-        applied = self._configure_lockin() if lockin else None
-        plan = self._field_plan(applied["time_constant_s"] if applied else None)
+        tc = self._lockin_time_constant() if lockin else None
+        if tc is not None:
+            msg = plans.b_sweep_lockin_validation(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"], tc,
+                                                  p["acq_time"])
+            if msg:
+                raise ServiceError(ErrorCode.INVALID_VALUE, f"with the lock-in's time constant of {tc:g} s: {msg}")
+        plan = self._field_plan(tc)
         n_sweeps = int(p["num_sweeps"])
         self._log("info", f"Points per sweep: {plan.n_total} ({len(plan.forward)} fwd + {len(plan.backward)} bwd)"
                           f" | T_point {plan.t_point_s * 1e3:.2f} ms | settle {plan.settle_s * 1e3:.2f} ms"
@@ -858,7 +931,6 @@ class ScanEngine:
         self._initial_field(p["b"])
         first = pts[0]
         self._move_xy_um(first.x_um, first.y_um)
-        self._configure_lockin()
         stage = self._dev(f"stage_{self.req.setup}")
         last_x, last_y = first.x_um, first.y_um
         last_coil = p["b"]
@@ -934,7 +1006,6 @@ class ScanEngine:
         x_um = y_um = math.nan
         if p.get("position_stage"):
             x_um, y_um = self._move_xy_um(p["x"], p["y"])
-        self._configure_lockin()
         self._writer.set_metadata(position_x_um=x_um, position_y_um=y_um)
         op = self._rpc(lambda: self._dev("moke").start_operation(
             "time_trace", coil_V=p["b"], n_points=n, interval_s=p["interval"], acq_time_s=p["acq_time"],
