@@ -113,6 +113,13 @@ class Workflow:
                 if p.max is not None and v > p.max:
                     raise ValueError(f"{p.label}: {v:g} {p.unit} is above the maximum {p.max:g} {p.unit}")
             out[p.name] = v
+        if self.key == "time":
+            # Samples back to back, as in Samba: there is no separate sampling interval any more
+            # (2026-11-17).  The interval is the averaging time Int, and a configuration saved with
+            # MiniMoke's duration / interval keeps its number of samples.
+            n = max(1, int(out["duration"] / out["interval"] + 1e-9))
+            out["interval"] = out["acq_time"]
+            out["duration"] = round(n * out["acq_time"], 9)
         return out
 
     def required_devices(self, params: dict, setup: str) -> list[str]:
@@ -223,8 +230,10 @@ _add(Workflow(
     "time", "Time trace", "T", "TIME",
     [
         Param("b", "Field (coil command)", default=0.0, group="Field", **COIL),
-        Param("duration", "Duration", "s", default=60.0, min=1e-3, max=1e6, decimals=3, group="Time"),
-        Param("interval", "Sampling interval", "s", default=0.5, min=1e-6, max=86400.0, decimals=4, group="Time"),
+        Param("duration", "Duration", "s", default=60.0, min=1e-6, max=1e6, decimals=3, group="Time",
+              help="samples × Int (the samples follow one another)"),
+        Param("interval", "Sampling interval", "s", default=0.5, min=1e-6, max=86400.0, decimals=4, group="Time",
+              help="always Int: samples back to back (kept for the service and the files)"),
         *_lockin_params(volt=0.0, acq=0.5),
         Param("x", "Position x", "um", default=0.0, min=-1e6, max=1e6, decimals=3, group="Position"),
         Param("y", "Position y", "um", default=0.0, min=-1e6, max=1e6, decimals=3, group="Position"),

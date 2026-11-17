@@ -105,3 +105,36 @@ def test_calibration_box_keeps_points_int_and_settle(qapp):
     box.load({"n": 50, "interval": 0.3, "acq_time": 0.02, "b": 0.4, "volt": 0.5, "sensi": 1e-3})
     assert box.values() == {"n": 50, "acq_time": 0.02, "settle_time": 1.0}
     assert box.total.text() == "≈ 2.0 s"                      # settle + points × Int
+
+
+def test_time_scans_take_their_samples_back_to_back(qapp, admin_client, tmp_path):
+    """No sampling interval any more (2026-11-17): interval = Int; an older configuration with
+    MiniMoke's duration / interval keeps its number of samples."""
+    wf = WORKFLOWS["time"]
+    p = wf.coerce({"duration": 6.0, "interval": 0.5, "acq_time": 0.1})
+    assert p["interval"] == 0.1 and p["duration"] == pytest.approx(1.2)          # still 12 samples
+    assert wf.coerce(p) == p                                                       # stable
+    from Samba_mini.panels.trajectory import TrajectoryPanel
+    t = TrajectoryPanel()
+    assert "interval" not in t.timing.w                                           # no Interval field
+    t.set_workflow("time")
+    t.set_params("time", {"duration": 6.0, "interval": 0.5, "acq_time": 0.1})    # saved before
+    assert t.x_grp.samples.value() == 12
+    got = wf.coerce(t.params())
+    assert got["interval"] == pytest.approx(0.1) and got["duration"] == pytest.approx(1.2)
+    t.x_grp.samples.setValue(30)
+    t.timing.w["acq_time"].setValue(0.02)
+    assert t.params()["duration"] == pytest.approx(0.6) and t.params()["interval"] == pytest.approx(0.02)
+    # a run handed an old interval measures back to back all the same
+    params = dict(b=0.0, duration=2.0, interval=0.5, x=0, y=0, position_stage=False, record_hall=False,
+                  settle_time=0.0, **FAST_LOCKIN)
+    req = RunRequest("time", params, setup="longitudinal", sample="S1", save_dir=str(tmp_path / "data"))
+    res = ScanEngine(admin_client, req, Callbacks()).run()
+    assert res["status"] == "completed" and res["points"] == 4
+    import json
+
+    import numpy as np
+    f = read_file(res["path"])
+    assert json.loads(f["metadata"]["params_json"])["interval"] == pytest.approx(FAST_LOCKIN["acq_time"])
+    gaps = np.diff(np.asarray(f["data"]["time"]["values"], dtype=float))
+    assert len(gaps) == 3 and (gaps < 0.3).all(), gaps     # one after another, not 0.5 s apart

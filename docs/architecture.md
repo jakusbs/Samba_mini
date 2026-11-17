@@ -271,9 +271,13 @@ the owners' workers).  Logical devices never open hardware themselves.
   Parameters saved with the earlier two waits (`settle_time` after moves,
   `field_settle_s` after coil changes) take the longer of the two.  Field sweeps
   keep their own per-point settle (from the sweep frequency / 5 τ).
-* **Calibration time scan:** Points, Int and Settle from the Calibration tab;
-  samples back to back (interval = Int, as in Samba); it measures with the coil
-  as it is (read from the DAQ just before) and the lock-in as it is set.
+* **Time scans** take their samples back to back, as in Samba: there is no
+  sampling interval any more (`Workflow.coerce` sets interval = Int and duration =
+  samples × Int; older configurations keep their number of samples).  The
+  service's `time_trace` keeps its `interval_s` argument.
+* **Calibration time scan:** Points, Int and Settle from the Calibration tab; it
+  measures with the coil as it is (read from the DAQ just before) and the lock-in
+  as it is set.
 * **Lock-in:** measurements never configure it -- only "Apply now" (Hardware
   box) or Samba_controls does; a run reads its settings before it starts (the
   lock-in B-sweep settles for the lock-in's real time constant), records them

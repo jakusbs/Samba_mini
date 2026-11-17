@@ -85,9 +85,9 @@ survives because a key is missing.  It only fills widgets: stage positions are
 
 ```
 ① Acquire        Calibration tab: Start runs the calibration time scan with the
-                 settings shown in its "Calibration scan" box (samples, interval,
-                 Int, coil, lock-in) — "From Hardware box" copies the values shown
-                 in the Trajectory tab's Hardware box.  Nothing else is used.
+                 settings shown in its "Calibration scan" box (Points, Int,
+                 Settle), samples back to back, with the coil and the lock-in as
+                 they are set (Hardware box).  Nothing else is used.
 ② Fit & review   When the scan completes it is fitted in the BD Calibration tab
                  (unsaved draft).  Or: Fit & Import… lists the calibration scans of
                  the data folder, best matches first, and fits the chosen one.
