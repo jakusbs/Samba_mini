@@ -48,7 +48,7 @@ Magnet-Physik, not redistributed here).
   the Ethernet socket follows every response with two raw bytes, the status and
   the overload byte (the overload byte is 0 = NUL normally, not during an
   overload).  They are detected at connect (`ID` probe) and read by count after
-  every transaction; an overload is logged.  An unreadable reply re-syncs the
+  every transaction; an overload is logged (at most every 5 min, with a count).  An unreadable reply re-syncs the
   stream and is asked once more, then fails without faulting the lock-in;
   reconnect = reopen + VISA clear + re-probe; port 50000 → 50001 fallback;
   one session shared for configuration and measurement; per point `XY.` read.
