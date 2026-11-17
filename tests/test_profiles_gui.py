@@ -163,6 +163,8 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     assert paths.same_path(w.dir_edit.text(), paths.user_measurement_dir("alice"))   # own folder
     defaults_params = w.trajectory.working_state()
     defaults_scan = w.calibration.timescan.values()
+    plot = w.calibration.plot
+    assert plot.selection() == {"y1": "dc_signal", "y2": "intensity"}       # BD / Intensity by default
     assert w.trajectory.meta.meta_operator.text() == "Alice A"           # default operator = full name
 
     # --- user A sets up an experiment
@@ -173,6 +175,8 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     w.trajectory.meta.meta_operator.setText("Alice")
     w.trajectory.meta.meta_notes.setText("annealed")
     w.calibration.timescan.load({"n": 42, "acq_time": 0.05, "settle_time": 0.25})
+    plot.y1.setCurrentIndex(plot.y1.findData("intensity"))               # the Calibration tab's Y1 / Y2
+    plot.y2.setCurrentIndex(plot.y2.findData(""))
     rec = save_and_activate(w, CAL1, "alice cal")
     w._save_config("longitudinal", "alice trace", "create")
     assert settle(qapp, w) == "saved"
@@ -186,6 +190,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     assert w.trajectory.meta.meta_notes.text() == ""
     assert w.trajectory.working_state() == defaults_params
     assert w.calibration.timescan.values() == defaults_scan
+    assert plot.selection() == {"y1": "dc_signal", "y2": "intensity"}
     assert w.bd_panel.get_calibration() == [0.0] * 6 and w.bd_panel.active() is None
     assert not w.plot1d._kerr_cal.ok
     assert w.config_list.names("longitudinal") == [] and w.store.values() == {}
@@ -198,6 +203,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     assert w.trajectory.meta.meta_operator.text() == "Bob B"
     assert w.trajectory.working_state() == defaults_params
     assert w.calibration.timescan.values() == defaults_scan
+    assert plot.selection() == {"y1": "dc_signal", "y2": "intensity"}
     assert w.bd_panel.active() is None and w.bd_panel.get_calibration() == [0.0] * 6
     assert w.config_list.names("longitudinal") == []
     w._login_logout()
@@ -209,6 +215,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     assert w.trajectory.meta.meta_sample.text() == "AliceSample"
     assert w.trajectory.meta.meta_operator.text() == "Alice"
     assert w.calibration.timescan.values() == {"n": 42, "acq_time": 0.05, "settle_time": 0.25}
+    assert plot.selection() == {"y1": "intensity", "y2": ""}                # A's Y1 / Y2 are back
     assert w.bd_panel.active()["record"]["id"] == rec["id"] and w.bd_panel.get_calibration() == CAL1
     assert w.config_list.current_name() == "alice trace"
     assert w.plot1d._kerr_cal.ok and w.plot1d._kerr_cal.mv == CAL1
@@ -365,6 +372,22 @@ def test_calibration_import_checks_setup_sample_and_mode(qapp, accounts, tmp_pat
     assert w.bd_panel.import_file(partial)
     rec2 = w.bd_panel.save(name="partial")
     assert any("did not complete" in p for p in rec2["fit"]["accepted_mismatches"])
+    close(w)
+
+
+def test_calibration_plot_choice_survives_closing_samba_mini(qapp, accounts):
+    """Reported 2026-11-17: nothing on Y1 and Intensity on Y2 came back as BD / Intensity after
+    closing and opening Samba_mini.  The choice is saved per account and setup."""
+    w = open_window(accounts)
+    login(w, OPERATOR)
+    plot = w.calibration.plot
+    plot.y1.setCurrentIndex(plot.y1.findData(""))                       # nothing on Y1
+    plot.y2.setCurrentIndex(plot.y2.findData("intensity"))
+    close(w)                                                             # closing saves the working state
+    w = open_window(accounts)
+    login(w, OPERATOR)
+    assert w.calibration.plot.selection() == {"y1": "", "y2": "intensity"}
+    assert w.calibration.plot.y1.currentText() == "—"
     close(w)
 
 

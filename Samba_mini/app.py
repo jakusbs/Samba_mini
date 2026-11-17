@@ -331,6 +331,7 @@ class MainWindow(QMainWindow):
         self.trajectory.changed.connect(self._update_scanlist_info)
         self.trajectory.changed.connect(self._working_changed)
         self.calibration.timescan.changed.connect(self._working_changed)
+        self.calibration.plot.selection_changed.connect(self._working_changed)   # Y1 / Y2 remembered
         self.scanlist.changed.connect(self._update_scanlist_info)
         self.config_list.config_selected.connect(lambda *_a: self._update_scanlist_info())
         self.right.plot_changed.connect(self._apply_plot_config)
@@ -648,6 +649,7 @@ class MainWindow(QMainWindow):
         self.right.load_all(ws.get("sensors"))                   # each measurement's channel rows
         self.calibration.timescan.reset()
         self.calibration.timescan.load(ws.get("calib_scan") or {})
+        self.calibration.plot.set_selection(ws.get("calib_plot"))     # missing: BD / Intensity
         name = ws.get("preset")
         if name in self.configs.get(setup, {}):
             self._preset_name[setup] = name
@@ -663,6 +665,7 @@ class MainWindow(QMainWindow):
         exp, optics = split_metadata(self.trajectory.meta.get_values())
         return {"v": WORKING_VERSION, "trajectory": self.trajectory.working_state(), "experiment": exp,
                 "optics": optics, "calib_scan": self.calibration.timescan.values(),
+                "calib_plot": self.calibration.plot.selection(),
                 "preset": self._preset_name[self.setup], "preset_clean": self._preset_clean[self.setup],
                 "sensors": self.right.all_states()}
 
