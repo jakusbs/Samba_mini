@@ -68,7 +68,7 @@ recovery: [docs/installation.md](docs/installation.md).
 
 ## Checks that passed
 
-Automated (`scripts\run_tests.bat`, 157 tests, ~270 s, no hardware touched):
+Automated (`scripts\run_tests.bat`, 157 tests, ~195 s, no hardware touched):
 
 | Area | What is verified |
 |---|---|

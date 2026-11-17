@@ -232,9 +232,15 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   started with (previously re-read from the fields before each scan).
   Simulation only.
 
+* 2026-11-17 — **Faster test suite** (branch `test/faster-xy-gui-tests`).
+  The three GUI tests that run an XY map waited the default 1 s Settle at
+  every point (~80 s together); they set Settle to 0 now (~12 s).  The Data
+  Browser test checks that the map is still being measured when it opens it.
+  Suite ≈270 s → ≈195 s.
+
 ## Tests
 
-`scripts\run_tests.bat` → **157 passed** (≈270 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **157 passed** (≈195 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
 engine 14, drivers 17, core 16, recovery 4, process 2, GUI 17, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 16,
