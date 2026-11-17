@@ -130,7 +130,8 @@ def test_time_trace(admin_client, tmp_path):
     assert res["status"] == "completed", res
     f = read_file(res["path"])
     t = f["data"]["time"]["values"]
-    assert len(t) == 6 and np.all(np.diff(t) > 0.03)
+    # samples back to back (no sampling interval since 2026-11-17): each lasts at least Int
+    assert len(t) == 6 and np.all(np.diff(t) >= 0.9 * FAST_LOCKIN["acq_time"])
     assert f["data"]["time"]["attrs"]["role"] == "x"
 
 

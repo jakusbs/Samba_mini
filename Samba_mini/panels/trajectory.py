@@ -122,7 +122,7 @@ class AxisGroup(QGroupBox):
         self.step = _dspin(1e-3, 1e6, 3, "µm")
         self.samples_lbl = QLabel("Samples N:")
         self.samples = _ispin(1, 10_000_000, 80)
-        self.samples.setToolTip("Time scan: number of samples (MiniMoke's duration = N × interval)")
+        self.samples.setToolTip("Time scan: number of samples, taken one after another (each averaged for Int)")
         for w in (self.n_lbl, self.npts, self.d_lbl, self.step, self.samples_lbl, self.samples):
             rl.addWidget(w)
         rl.addStretch()
@@ -319,21 +319,17 @@ class TimingGroup(QGroupBox):
         self.w = {
             "acq_time": _dspin(1e-5, 600.0, 5, "s", 90),
             "settle_time": _dspin(0.0, 60.0, 3, "s", 90),
-            "interval": _dspin(1e-6, 86400.0, 4, "s", 90),
         }
         tips = {"acq_time": "Int: how long each point is averaged (DAQ window at 50 kHz; the Hall probe "
                             "integrates min(Int, 0.54 s))",
                 "settle_time": "Wait before measuring so things have settled:\n"
                                "spatial scans: after every stage move and every coil change (+B → −B);\n"
-                               "time scans: once, before the first sample (after the stage move and the coil).",
-                "interval": "Time scan only: time from the start of one sample to the start of the next.\n"
-                            "Samples N × interval = duration (MiniMoke's 'Sampling interval').\n"
-                            "Each sample is averaged for Int; if Int is longer than the interval, the samples\n"
-                            "simply follow one another."}
+                               "time scans: once, before the first sample (after the stage move and the coil)."}
         # No "Repeats" field: as in Samba, a measurement is repeated with the Scanlist tab (one file
         # per scan).  MiniMoke's repeat_num is always 1: an X/Y-sweep measures its line once at +B
         # and once at −B, an XY map is measured once.
-        rows = [("Int (s):", "acq_time"), ("Settle (s):", "settle_time"), ("Interval (s):", "interval")]
+        # No "Interval": time scans take their samples back to back, as in Samba (2026-11-17).
+        rows = [("Int (s):", "acq_time"), ("Settle (s):", "settle_time")]
         self.labels = {}
         for r, (label, key) in enumerate(rows):
             lbl = QLabel(label)
@@ -575,7 +571,9 @@ class TrajectoryPanel(QWidget):
             v.update(x_min=x0, x_max=x1, x_step=dx, y_min=y0, y_max=y1, y_step=dy,
                      x=self.x_grp.fixed.value(), y=self.y_grp.fixed.value())
             if key == "time":
-                v["duration"] = round(self.x_grp.samples.value() * float(v.get("interval", 0.5)), 9)
+                acq = float(v.get("acq_time", WORKFLOWS["time"].param("acq_time").default))
+                v["interval"] = acq                             # samples back to back
+                v["duration"] = round(self.x_grp.samples.value() * acq, 9)
                 v["position_stage"] = self.time_move.isChecked()
         return v
 
@@ -616,9 +614,10 @@ class TrajectoryPanel(QWidget):
                 if "y" in v:
                     self.y_grp.fixed.setValue(float(v["y"]))
                 if key == "time":
-                    interval = float(v.get("interval", self._all_values("time").get("interval", 0.5)))
+                    # MiniMoke's duration / interval (older configurations) or samples × Int
+                    interval = v.get("interval") or v.get("acq_time") or self._all_values("time")["acq_time"]
                     if "duration" in v:
-                        self.x_grp.samples.setValue(plans.time_points(float(v["duration"]), interval))
+                        self.x_grp.samples.setValue(plans.time_points(float(v["duration"]), float(interval)))
                     if "position_stage" in v:
                         self.time_move.setChecked(bool(v["position_stage"]))
         finally:
