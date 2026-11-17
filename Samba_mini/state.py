@@ -193,6 +193,12 @@ class PrefsStore(QObject):
                 self._set_state("saved", "")
         self._caller.submit(lambda: c.call("prefs.set", {"values": vals}, 10.0), done)
 
+    def shutdown(self) -> None:
+        """Window closing: stop the save worker (after flush_sync)."""
+        self._timer.stop()
+        self._enabled = False
+        self._caller.shutdown()
+
     def flush_sync(self, timeout_s: float = 10.0) -> str | None:
         """Save everything now (logout, window close).  Returns None or the error text."""
         if not self._enabled:

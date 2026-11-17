@@ -62,7 +62,7 @@ def describe_record(rec: dict | None, short: bool = False) -> str:
     sample = rec.get("sample_id")
     mode = rec.get("mode")
     parts = [head, f"sample {sample!r}" if sample else "sample unknown",
-             mode if mode else "mode unknown",
+             mode if mode else ("entered by hand" if rec.get("origin") == "manual" else "mode unknown"),
              f"by {rec.get('creator') or 'unknown'}, {_fmt_time(rec.get('created'))}"]
     if rec.get("origin") == "fit" and rec.get("source_file"):
         parts.append(f"fit of {os.path.basename(rec['source_file'])}")

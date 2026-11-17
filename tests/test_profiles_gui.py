@@ -253,7 +253,7 @@ def test_data_folder_is_one_setting_and_failed_saves_keep_the_edits(qapp, accoun
     monkeypatch.setattr(c, "call", failing)
     w.profile.operator.setText("Dr. A")
     assert wait_until(qapp, lambda: w.store.state == "error", 10)
-    assert "NOT SAVED" in w.sb["Saved"].text() and w.profile.retry_btn.isVisible() is False or True
+    assert "NOT SAVED" in w.sb["Saved"].text() and not w.profile.retry_btn.isHidden()
     assert "disk full" in w.profile.save_state.text()
     assert w.profile.operator.text() == "Dr. A" and w.store.pending()["default_operator"] == "Dr. A"
     monkeypatch.setattr(c, "call", orig)
@@ -277,7 +277,6 @@ def test_saving_preferences_never_touches_calibration_edits(qapp, accounts):
     assert w.bd_panel.get_calibration() == CAL2 and w.bd_panel.is_dirty()   # ... leave the editor alone
     assert w.bd_panel.active()["record"]["id"] == rec["id"]
     # Navigation that would drop the edit asks: Cancel keeps everything where it was.
-    import Samba_mini.panels.bd_calibration as bdmod
     answers = []
     orig_q = QMessageBox.question
     QMessageBox.question = staticmethod(lambda *a, **k: answers.append(a[1]) or QMessageBox.StandardButton.Cancel)
@@ -289,7 +288,6 @@ def test_saving_preferences_never_touches_calibration_edits(qapp, accounts):
     finally:
         QMessageBox.question = orig_q
     assert answers == ["Unsaved calibration", "Unsaved calibration"]
-    assert bdmod is not None
     close(w)
 
 

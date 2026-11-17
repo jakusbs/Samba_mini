@@ -221,8 +221,10 @@ the owners' workers).  Logical devices never open hardware themselves.
   (`argon2-cffi`, salted, default work factors).  Roles: `admin` (edit machine
   configuration, manage users) and `operator`.  The first account created on an
   empty database becomes admin.
-* Per-user preferences, named presets, sample/operator defaults and data folder
-  are stored in the same database and served by the backend after login.
+* Per-user preferences, per-setup working state, named presets and λ/2
+  calibration records (schema 2) are stored in the same database and served by
+  the backend after login.  Who owns what, when it is saved and how the
+  calibration snapshot reaches the files: [profiles-and-calibration.md](profiles-and-calibration.md).
 * `auth.login` returns a random session token; every request except
   `server.hello`/`auth.login` requires it.  Sessions identify the operator.
 * **Lease:** one setup lease guards every mutation (attribute writes, mutating

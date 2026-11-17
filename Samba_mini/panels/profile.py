@@ -27,6 +27,7 @@ class ProfilePanel(QWidget):
         super().__init__(parent)
         self._bridge = bridge_getter
         self.store = store
+        self._loading = False
         lay = QHBoxLayout(self)
         box = QGroupBox("My preferences")
         g = QGridLayout(box)
@@ -62,6 +63,8 @@ class ProfilePanel(QWidget):
         b_pw = QPushButton("Change password…")
         b_pw.clicked.connect(self._change_password)
         g.addWidget(b_pw, 5, 1)
+        g.setRowStretch(6, 1)                     # extra height below the fields, not between them
+        g.setColumnStretch(1, 1)
         lay.addWidget(box, 2)
         note = QLabel("Saved automatically to your account by the device service on this PC: these "
                       "preferences, and per setup your measurement draft, the current experiment (sample, "
@@ -80,7 +83,6 @@ class ProfilePanel(QWidget):
         self.csv.toggled.connect(lambda on: self._edited("export_csv", bool(on)))
         self.store.changed.connect(self._on_store_changed)
         self.store.status_changed.connect(self._show_state)
-        self._loading = False
         self._show_state(self.store.state, self.store.error)
 
     def _browse(self):

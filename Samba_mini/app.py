@@ -752,7 +752,10 @@ class MainWindow(QMainWindow):
 
     def _on_workflow_changed(self, key: str) -> None:
         self.right.configure_for(key)
-        self.live_tabs.setCurrentWidget(self.map2d if key == "xy_sweep" else self.plot1d)
+        # Restoring a saved state (login, setup switch) must not pull the user away from the
+        # Calibration or Log tab; picking a measurement does show its plot.
+        if not self._restoring or self.live_tabs.currentWidget() in (self.map2d, self.plot1d):
+            self.live_tabs.setCurrentWidget(self.map2d if key == "xy_sweep" else self.plot1d)
 
     # ================================================================ named configurations
     def _preset_value(self) -> dict:
@@ -1566,6 +1569,7 @@ class MainWindow(QMainWindow):
         except ServiceError:
             pass
         self.store.reset({}, enabled=False)
+        self.store.shutdown()
         self.bridge.close()
         super().closeEvent(ev)
 
