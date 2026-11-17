@@ -15,7 +15,7 @@ from __future__ import annotations
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton
 
-from core.gui.bridge import call_async, error_text
+from core.gui.bridge import call_guarded, error_text
 from Samba_mini.panels.widgets import NoScrollDoubleSpinBox
 
 LOCKIN_FIELDS = [   # param, label, unit, min, max, decimals  (union of the workflows' limits)
@@ -88,6 +88,12 @@ class HardwareGroup(QGroupBox):
         self.li_read = QLabel("")
         self.li_read.setStyleSheet(_SMALL)
         lg.addWidget(self.li_read, 6, 0, 1, 4)
+        self.li_applied = QLabel("")
+        self.li_applied.setStyleSheet(_SMALL)
+        self.li_applied.setWordWrap(True)
+        self.li_applied.setToolTip("What the 7270 accepted at the last 'Apply now' (the fields above are the "
+                                   "values requested for the measurement)")
+        lg.addWidget(self.li_applied, 7, 0, 1, 4)
         lay.addWidget(self.li_box, 3)
 
         # ---------------------------------------------------------- field
@@ -107,7 +113,8 @@ class HardwareGroup(QGroupBox):
         fg.addWidget(self.coil, 1, 1)
         b_set = QPushButton("Set")
         b_set.setFixedWidth(44)
-        b_set.clicked.connect(lambda: self._cmd("daq", "set_outputs", coil_V=self.coil.value()))
+        b_set.clicked.connect(lambda: self._cmd("daq", "set_outputs", self._show_coil_applied,
+                                                coil_V=self.coil.value()))
         fg.addWidget(b_set, 1, 2)
         fg.addWidget(QLabel("Field:"), 2, 0)
         self.hall = _readout()
@@ -116,12 +123,16 @@ class HardwareGroup(QGroupBox):
         self.coil_rb = _readout()
         fg.addWidget(self.coil_rb, 3, 1, 1, 2)
         b_zero = QPushButton("Zero outputs")
-        b_zero.clicked.connect(lambda: self._cmd("daq", "zero_outputs"))
+        b_zero.clicked.connect(lambda: self._cmd("daq", "zero_outputs", self._show_coil_applied))
         b_hall0 = QPushButton("Zero Hall")
         b_hall0.setToolTip("Zero the Hall probe (only at zero field)")
         b_hall0.clicked.connect(self._hall_zero)
         fg.addWidget(b_zero, 4, 0, 1, 2)
         fg.addWidget(b_hall0, 4, 2)
+        self.coil_applied = QLabel("")
+        self.coil_applied.setStyleSheet(_SMALL)
+        self.coil_applied.setToolTip("The coil command the DAQ accepted at the last 'Set' / 'Zero outputs'")
+        fg.addWidget(self.coil_applied, 5, 0, 1, 3)
         lay.addWidget(fb, 2)
 
         # ---------------------------------------------------------- detectors
@@ -141,6 +152,7 @@ class HardwareGroup(QGroupBox):
         self._readouts = {("hall", "field_mT"): (self.hall, "mT"), ("daq", "coil_command_V"): (self.coil_rb, "V"),
                           ("daq", "balanced_V"): (self.bal, "V"), ("daq", "intensity_V"): (self.inten, "V"),
                           ("lockin", "x_V"): (self.li_x, "V"), ("lockin", "r_V"): (self.li_r, "V")}
+        self._dev_state: dict[str, str] = {}
 
     # ------------------------------------------------------------------ values
     def lockin_values(self) -> dict:
@@ -166,10 +178,32 @@ class HardwareGroup(QGroupBox):
         self.coil.setToolTip(self.coil.toolTip().split("\n")[0] + ("" if used else
                              "\nField sweeps set the coil themselves; this value is only for 'Set'."))
 
+    def set_device_state(self, dev: str, state: str, status: str = "") -> None:
+        """A device left (or re-entered) a usable state: its readouts say so instead of showing an
+        old number as if it were live."""
+        usable = state in ("ON", "MOVING", "RUNNING")
+        self._dev_state[dev] = state
+        for (d, _a), (lbl, _u) in self._readouts.items():
+            if d == dev and not usable:
+                lbl.setText(state.lower() if state else "—")
+                lbl.setToolTip(f"{dev}: {state} {status}".strip())
+                lbl.setStyleSheet("font-family:Consolas,'Courier New';font-size:13px;color:#6c7086;")
+
+    def reset_session(self) -> None:
+        """New login/logout: forget readouts and applied values (live values arrive again)."""
+        for lbl, _u in self._readouts.values():
+            lbl.setText("—")
+            lbl.setToolTip("")
+            lbl.setStyleSheet(_VAL)
+        for lbl in (self.li_read, self.li_applied, self.coil_applied):
+            lbl.setText("")
+
     def set_readout(self, dev: str, attr: str, value, quality: str = "") -> bool:
         entry = self._readouts.get((dev, attr))
         if entry is None:
             return False
+        if self._dev_state.get(dev, "ON") not in ("ON", "MOVING", "RUNNING"):
+            return True                          # keep showing the state (a stale cache value is not live)
         lbl, unit = entry
         if value is None or (isinstance(value, float) and value != value):
             lbl.setText("—")
@@ -185,27 +219,50 @@ class HardwareGroup(QGroupBox):
         b = self._bridge()
         return b.client if b else None
 
-    def _cmd(self, device: str, command: str, **args) -> None:
+    def _cmd(self, device: str, command: str, on_result=None, **args) -> None:
         c = self._client()
         if c is None:
             return
-        call_async(lambda: c.device(device).command(command, **args),
-                   lambda r: self.message.emit("info", f"{device}.{command}: done"),
-                   lambda e: self.message.emit("error", f"{device}.{command}: {error_text(e)}"))
+
+        def ok(r):
+            self.message.emit("info", f"{device}.{command}: done")
+            if on_result is not None:
+                on_result(r)
+        # A reply that arrives after a logout / another login is dropped (call_guarded); the
+        # service itself checks the lease and refuses the command otherwise.
+        call_guarded(c, lambda: c.device(device).command(command, **args), ok,
+                     lambda e: self.message.emit("error", f"{device}.{command}: {error_text(e)}"))
 
     def _lockin_apply(self) -> None:
         v = self.lockin_values()
-        self._cmd("lockin", "configure", volt=v["volt"], sensi=v["sensi"], freq=v["lockin_freq"],
-                  time_const=v["time_const"], phase=v["phase"])
+        self.li_applied.setText("Applying…")
+        self._cmd("lockin", "configure", self._show_lockin_applied, volt=v["volt"], sensi=v["sensi"],
+                  freq=v["lockin_freq"], time_const=v["time_const"], phase=v["phase"])
+
+    def _show_lockin_applied(self, r) -> None:
+        if not isinstance(r, dict):
+            self.li_applied.setText(f"Applied: {r}")
+            return
+        parts = []
+        for key, label, unit in (("oscillator_V", "Ampl", "V"), ("sensitivity_V", "Sens", "V"),
+                                 ("frequency_Hz", "Freq", "Hz"), ("time_constant_s", "TC", "s"),
+                                 ("phase_deg", "Phase", "°")):
+            if isinstance(r.get(key), (int, float)):
+                parts.append(f"{label} {r[key]:.4g} {unit}")
+        self.li_applied.setText("Applied: " + ("  ".join(parts) if parts else str(r)))
+
+    def _show_coil_applied(self, r) -> None:
+        v = r.get("coil_V") if isinstance(r, dict) else None
+        self.coil_applied.setText(f"Applied: coil {v:+.4g} V" if isinstance(v, (int, float)) else "Applied")
 
     def _lockin_read(self) -> None:
         c = self._client()
         if c is None:
             return
-        call_async(lambda: c.device("lockin").command("read_xyrt"),
-                   lambda r: self.li_read.setText(f"X {r['x_V']:.4g} V   Y {r['y_V']:.4g} V   "
-                                                  f"θ {r['theta_deg']:.1f}°"),
-                   lambda e: self.message.emit("error", f"lock-in read: {error_text(e)}"))
+        call_guarded(c, lambda: c.device("lockin").command("read_xyrt"),
+                     lambda r: self.li_read.setText(f"X {r['x_V']:.4g} V   Y {r['y_V']:.4g} V   "
+                                                    f"θ {r['theta_deg']:.1f}°"),
+                     lambda e: self.message.emit("error", f"lock-in read: {error_text(e)}"))
 
     def _hall_zero(self) -> None:
         if QMessageBox.question(self, "Zero Hall probe", "Zero the Hall probe now? The field must be zero."

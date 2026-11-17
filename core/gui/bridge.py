@@ -104,6 +104,78 @@ def call_async(fn: Callable[[], Any], ok: Callable[[Any], None] | None = None,
     QThreadPool.globalInstance().start(task)
 
 
+def call_guarded(client: ServiceClient, fn: Callable[[], Any], ok: Callable[[Any], None] | None = None,
+                 err: Callable[[Exception], None] | None = None,
+                 still_valid: Callable[[], bool] | None = None) -> None:
+    """``call_async`` whose reply is delivered only while it is still relevant: the client's
+    session is the one the request was made in (no login, logout or expiry since) and
+    ``still_valid()`` -- e.g. "the same device / setup is still selected" -- holds.  An obsolete
+    reply is dropped (logged at debug level), so it can never update what another user or
+    another device now shows."""
+    epoch = client.session_epoch
+
+    def current() -> bool:
+        return client.session_epoch == epoch and (still_valid is None or bool(still_valid()))
+
+    def done_ok(res):
+        if current():
+            if ok:
+                ok(res)
+        else:
+            log.debug("dropped an obsolete reply")
+
+    def done_err(exc):
+        if current():
+            if err:
+                err(exc)
+            else:
+                log.warning("background call failed: %s", exc)
+        else:
+            log.debug("dropped an obsolete error: %s", exc)
+
+    call_async(fn, done_ok, done_err)
+
+
+class _Relay(QObject):
+    done = pyqtSignal(object, object, object)       # callback, result, exception
+
+
+class SerialCaller(QObject):
+    """Runs background calls one after another on a single worker thread, so that requests
+    of one kind (e.g. preference saves) reach the service in the order they were made; results
+    are delivered on the GUI thread.  ``call_sync`` waits for everything queued before it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from concurrent.futures import ThreadPoolExecutor
+        self._exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serial-call")
+        self._relay = _Relay()
+        self._relay.done.connect(self._deliver)
+
+    def _deliver(self, cb, res, exc) -> None:
+        if cb is not None:
+            cb(res, exc)
+
+    def submit(self, fn: Callable[[], Any], done: Callable[[Any, Exception | None], None]) -> None:
+        relay = self._relay
+
+        def run():
+            try:
+                res = fn()
+            except Exception as exc:  # noqa: BLE001 - delivered to the caller
+                relay.done.emit(done, None, exc)
+            else:
+                relay.done.emit(done, res, None)
+        self._exec.submit(run)
+
+    def call_sync(self, fn: Callable[[], Any], timeout_s: float = 10.0) -> Any:
+        """Run *fn* after the queued calls and return its result (raises its exception)."""
+        return self._exec.submit(fn).result(timeout=timeout_s)
+
+    def shutdown(self) -> None:
+        self._exec.shutdown(wait=False, cancel_futures=True)
+
+
 class EngineBridge(QObject):
     state = pyqtSignal(str, str)
     point = pyqtSignal(object)

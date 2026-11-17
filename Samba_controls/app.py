@@ -270,6 +270,7 @@ class ControlsWindow(QMainWindow):
         self.bridge.client.lease_holder = False
         self.user_lbl.setText("not logged in")
         self.login_btn.setText("Log in")
+        self.panel.reset("Service stopped")
         meaning = {0: "", 3: " — another service instance is already running", 4: " — port in use"}.get(code, "")
         self._msg("warning" if code else "info", f"Service exited with code {code}{meaning}")
 
@@ -277,6 +278,7 @@ class ControlsWindow(QMainWindow):
     def _login(self) -> None:
         dlg = LoginDialog(self.bridge, "Samba_controls", self)
         if dlg.exec() == LoginDialog.DialogCode.Accepted:
+            self.panel.reset()                      # nothing shown belongs to the new session yet
             u = self.bridge.client.user
             self.user_lbl.setText(f"{u['username']} ({u['role']})")
             self.login_btn.setText("Log out")
@@ -302,6 +304,7 @@ class ControlsWindow(QMainWindow):
                 return
             self.user_lbl.setText("not logged in")
             self.login_btn.setText("Log in")
+            self.panel.reset("Log in to see the devices")
         else:
             if self.bridge.probe(1.0) is None:
                 QMessageBox.information(self, "Service", "Start the service first.")
@@ -365,6 +368,7 @@ class ControlsWindow(QMainWindow):
     def _on_event(self, topic: str, body: dict) -> None:
         if topic.startswith("state."):
             self.table.set_state(body.get("device", ""), body.get("state", ""), body.get("status", ""))
+            self.panel.on_state(body.get("device", ""), body.get("state", ""), body.get("status", ""))
             if body.get("state") == "FAULT":
                 self._svc_line(f"[fault] {body.get('device')}: {body.get('status')}", "#f38ba8")
         elif topic == "lease":
@@ -375,6 +379,11 @@ class ControlsWindow(QMainWindow):
             self._set_badge("SERVICE STOPPED", "offline_badge")
         elif what == "lease_lost":
             self._msg("warning", "You lost control of the setup.")
+        elif what in ("session_lost", "restarted"):
+            self.panel.reset("Log in again to see the devices")
+            if what == "session_lost":
+                self.user_lbl.setText("session expired")
+                self.login_btn.setText("Log in")
 
     def _tab_changed(self, idx: int) -> None:
         w = self.bottom.widget(idx)

@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog,
 
 from core import paths
 from core.data_browser import DataBrowserPanel
-from core.gui.bridge import EngineBridge, ServiceBridge, call_async, error_text
+from core.gui.bridge import EngineBridge, ServiceBridge, error_text
 from core.gui.login import LoginDialog
 from core.plot_config import X_NATURAL, X_TIME
 from core.plot_widgets import Live1DWidget, Live2DWidget
@@ -44,13 +44,15 @@ from core.scan.engine import RunRequest, ScanEngine
 from core.scan.workflows import WORKFLOWS
 from core.theme import app_style
 from core.version import __version__, describe
-from Samba_mini.panels.bd_calibration import BDCalibrationPanel
+from Samba_mini.panels.bd_calibration import BDCalibrationPanel, describe_record
 from Samba_mini.panels.calibration import CalibrationPanel
 from Samba_mini.panels.config_list import SETUPS, ConfigListPanel
 from Samba_mini.panels.profile import ProfilePanel
 from Samba_mini.panels.right_panel import RightPanel
 from Samba_mini.panels.scanlist import ScanlistPanel
 from Samba_mini.panels.trajectory import TrajectoryPanel
+from Samba_mini.state import (EXPERIMENT_KEYS, LEGACY_IDENTITY_KEYS, OPTICS_KEYS, PRESET_SCHEMA, WORKING_VERSION,
+                              PrefsStore, canonical, split_metadata, working_key)
 
 
 RUN_META_KEYS = ("device_id", "incidence", "mirror_shift", "polarization", "lam2", "lam4", "noDC",
@@ -71,8 +73,21 @@ class MainWindow(QMainWindow):
         self.engine: ScanEngine | None = None
         self.engine_bridge = EngineBridge(self)
         self.setup = "longitudinal"
-        self.prefs: dict = {}
+        # One store for the account's preferences and per-setup working state (autosaved);
+        # see Samba_mini/state.py for what is remembered where.
+        self.store = PrefsStore(lambda: self.bridge.client, parent=self)
         self.configs: dict[str, dict[str, dict]] = {s: {} for s in SETUPS}
+        self._preset_name: dict[str, str | None] = {s: None for s in SETUPS}     # selected configuration
+        self._preset_clean: dict[str, str | None] = {s: None for s in SETUPS}    # its saved form (canonical)
+        self._restoring = False                                # filling widgets from stored state
+        self._session_user: dict | None = None
+        self._stash: dict | None = None                        # unsaved state of an expired session
+        self._session_lost_pending = False
+        self._run_cal: dict | None = None                      # calibration frozen for the current run
+        self._ws_timer = QTimer(self)                          # working-state autosave (debounced)
+        self._ws_timer.setSingleShot(True)
+        self._ws_timer.setInterval(300)
+        self._ws_timer.timeout.connect(self._save_working)
         self._run_t0: float | None = None
         self._run_state = "IDLE"
         self._progress = (0, 0)
@@ -168,9 +183,9 @@ class MainWindow(QMainWindow):
         self.bottom_tabs = QTabWidget()
         self.trajectory = TrajectoryPanel(lambda: self.bridge)
         self.browser = DataBrowserPanel(self._data_dir)
-        self.profile = ProfilePanel(lambda: self.bridge)
+        self.profile = ProfilePanel(lambda: self.bridge, self.store)
         self.scanlist = ScanlistPanel()
-        self.bd_panel = BDCalibrationPanel(self._data_dir)
+        self.bd_panel = BDCalibrationPanel(self._data_dir, self._cal_context)
         self.bottom_tabs.addTab(self.trajectory, "Trajectory")
         self.bottom_tabs.addTab(self.scanlist, "Scanlist")
         self.bottom_tabs.addTab(self.bd_panel, "BD Calibration")
@@ -283,11 +298,12 @@ class MainWindow(QMainWindow):
                 row.addWidget(sep)
         row.addStretch(1)
         sb.addWidget(container, 1)
-        for key in ("Mode", "User"):
+        for key in ("Saved", "Mode", "User"):
             lbl = QLabel(f"{key}: —")
             lbl.setStyleSheet("color:#a6adc8;font-size:12px;padding:0 6px;")
             sb.addPermanentWidget(lbl)
             self.sb[key] = lbl
+        self._show_save_state(self.store.state, self.store.error)
         self._tint("IDLE")
 
     def _wire(self) -> None:
@@ -306,25 +322,30 @@ class MainWindow(QMainWindow):
         for w in (self.plot1d, self.map2d, self.browser.plot):
             w.set_kerr_state(self.kerr_state)
         self.kerr_state.subscribe(self._on_kerr_toggled)
-        self.bd_panel.calibration_applied.connect(self._push_kerr_calibration)
-        self.bd_panel.save_requested.connect(self._bd_save)
-        self.bd_panel.load_requested.connect(lambda: self._bd_load(announce=True))
+        self.bd_panel.active_changed.connect(self._on_active_calibration)
+        self.bd_panel.message.connect(self._log)
         self.trajectory.meta.sample_edited.connect(self._on_sample_edited)
         self.trajectory.changed.connect(self._update_scanlist_info)
+        self.trajectory.changed.connect(self._working_changed)
+        self.calibration.timescan.changed.connect(self._working_changed)
+        self.calibration.timescan.copy_requested.connect(self._copy_hardware_to_calibration_scan)
         self.scanlist.changed.connect(self._update_scanlist_info)
         self.config_list.config_selected.connect(lambda *_a: self._update_scanlist_info())
         self.right.plot_changed.connect(self._apply_plot_config)
         self.right.map_sensor_changed.connect(self._switch_map_sensor)
         self.right.colormap_changed.connect(self.map2d.set_colormap)
         self.config_list.config_selected.connect(self._load_config)
-        self.config_list.save_requested.connect(self._save_config)
+        self.config_list.new_requested.connect(lambda s, n: self._save_config(s, n, "create"))
+        self.config_list.save_requested.connect(lambda s, n: self._save_config(s, n, "update"))
         self.config_list.copy_requested.connect(self._copy_config)
         self.config_list.delete_requested.connect(self._delete_config)
         self.config_list.rename_requested.connect(self._rename_config)
         self.calibration.message.connect(self._log)
         self.trajectory.hardware.message.connect(self._log)
         self.profile.message.connect(self._log)
-        self.profile.saved.connect(self._apply_prefs)
+        self.dir_edit.textChanged.connect(self._on_dir_edited)
+        self.store.changed.connect(self._on_store_changed)
+        self.store.status_changed.connect(self._show_save_state)
         self.log_filter.currentIndexChanged.connect(lambda _i: self._render_log())
         eb = self.engine_bridge
         eb.state.connect(self._on_engine_state)
@@ -340,10 +361,16 @@ class MainWindow(QMainWindow):
         self.addAction(sc)
         self._on_workflow_changed(self.trajectory.current)
         self.trajectory.set_setup(self.setup)
+        self._apply_session(None, self.setup)          # the logged-out state: explicit defaults
         self._show_estimate()
         self._update_scanlist_info()
 
     # ================================================================ helpers
+    @property
+    def prefs(self) -> dict:
+        """The account's preferences as currently known (read-only view of the store)."""
+        return self.store.values()
+
     def _data_dir(self) -> str:
         return self.dir_edit.text().strip() or str(paths.default_measurement_dir())
 
@@ -351,6 +378,38 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Data folder", self._data_dir())
         if d:
             self.dir_edit.setText(d)
+
+    def _on_dir_edited(self, text: str) -> None:
+        """The action bar's Dir: and the Profile tab's data folder are one setting."""
+        if not self._restoring:
+            self.store.set("data_dir", text.strip())
+
+    def _on_store_changed(self, key: str, value) -> None:
+        if key == "data_dir" and self.dir_edit.text().strip() != str(value or "").strip():
+            self.dir_edit.blockSignals(True)
+            self.dir_edit.setText(str(value or "") or str(paths.default_measurement_dir()))
+            self.dir_edit.blockSignals(False)
+
+    def _show_save_state(self, state: str, text: str) -> None:
+        shown = {"offline": ("—", "#6c7086", "Not logged in: nothing is saved"),
+                 "saved": ("✓ saved", "#a6e3a1", "Preferences and working state are saved to your account"),
+                 "pending": ("● unsaved", "#fab387", "Changes are about to be saved"),
+                 "saving": ("● saving…", "#fab387", "Saving to your account"),
+                 "error": ("⚠ NOT SAVED", "#f38ba8", text + "\nYour changes are kept; see the Profile tab (Retry)")}
+        label, color, tip = shown.get(state, (state, "#a6adc8", ""))
+        lbl = self.sb["Saved"]
+        lbl.setText(f"Prefs: {label}")
+        lbl.setToolTip(tip)
+        lbl.setStyleSheet(f"color:{color};font-size:12px;padding:0 6px;")
+        if state == "error":
+            self._log("error", f"Preferences {text}")
+
+    def _cal_context(self) -> dict:
+        """What the BD Calibration tab checks files and records against."""
+        c = self._client()
+        return {"client": c if c.session else None, "setup": self.setup,
+                "sample_id": self.trajectory.meta.meta_sample.text().strip(),
+                "mode": (self.bridge.hello_info or {}).get("mode")}
 
     _LOG_COLORS = {"error": "#f38ba8", "warning": "#fab387", "info": "#a6e3a1", "debug": "#6c7086"}
 
@@ -438,38 +497,119 @@ class MainWindow(QMainWindow):
         self._after_login()
         return True
 
+    # ---------------------------------------------------------------- session state
+    # Login, logout, session expiry and account changes all end in _apply_session(), which sets
+    # every user-owned widget from the store or to an explicit default -- nothing of a previous
+    # user survives because a key happens to be missing.  It never touches an instrument: only
+    # widgets are filled (stage positions are *read*).
     def _after_login(self) -> None:
         c = self._client()
-        user = c.user or {}
+        user = dict(c.user or {})
+        err = ""
+        try:
+            prefs = c.call("prefs.get", {}, 10.0)
+            ok = isinstance(prefs, dict)
+        except ServiceError as exc:
+            prefs, ok = {}, False
+            err = (f"could not be loaded ({error_text(exc)}); nothing will be saved until you log in "
+                   "again, so the stored values are not overwritten")
+        stash, self._stash = self._stash, None
+        self.store.reset(prefs if ok else {}, enabled=ok, error=err)
+        restored = False
+        if stash and ok and stash.get("user") == user.get("username"):
+            self.store.update(stash.get("prefs") or {})          # the expired session's unsaved changes
+            restored = True
+        elif stash:
+            self._log("warning", f"Unsaved changes of {stash.get('user')} from an expired session were "
+                      "discarded (another account logged in).")
+        self._session_user = user
         self.user_lbl.setText(f"{user.get('username')} ({user.get('role')})")
         self.login_btn.setText("Log out")
-        try:
-            self.prefs = c.call("prefs.get")
-        except ServiceError:
-            self.prefs = {}
-        self.profile.load(user, self.prefs)
-        self._apply_prefs(self.prefs)
-        self._reload_configs()
+        setup = self.store.get("setup")
+        self._apply_session(user, setup if setup in SETUPS else "longitudinal")
+        if restored:
+            if stash.get("bd") and stash["bd"].get("setup") == self.setup:
+                self.bd_panel.restore_draft(stash["bd"])
+            self._log("info", "Restored the unsaved changes of your expired session.")
         self._log("info", f"Logged in as {user.get('username')}")
-        self.calibration.refresh_positions()
-        self._update_control_btn()
+        if err:
+            self._log("error", f"Preferences {err}")
 
-    def _apply_prefs(self, prefs: dict) -> None:
-        self.prefs = prefs or {}
-        if self.prefs.get("data_dir"):
-            self.dir_edit.setText(self.prefs["data_dir"])
-        meta = {}
-        if self.prefs.get("default_operator"):
-            meta["operator"] = self.prefs["default_operator"]
-        if self.prefs.get("default_sample"):
-            meta["sample_id"] = self.prefs["default_sample"]
-        self.trajectory.set_metadata(meta)
-        self._last_sample = self.trajectory.meta.meta_sample.text().strip()
-        if self.prefs.get("setup") in SETUPS:
-            self.set_setup(self.prefs["setup"])
-        self._bd_load()
-        self.kerr_state.set(bool(self.prefs.get("kerr_display", False)))
-        self.calibration.timescan.load(self.prefs.get("calib_timescan") or {})
+    def _apply_session(self, user: dict | None, setup: str) -> None:
+        self._restoring = True
+        try:
+            self._ws_timer.stop()
+            self.profile.load(user)
+            self.dir_edit.setText(self.store.get("data_dir") or str(paths.default_measurement_dir()))
+            self.kerr_state.set(bool(self.store.get("kerr_display", False)))
+            self._reload_configs()
+            self.trajectory.hardware.reset_session()
+            self.calibration.reset_session()
+            self.plot1d.clear()
+            self.map2d.clear()
+            self._map_data, self._map_axes = {}, None
+            self._enter_setup(setup)
+        finally:
+            self._restoring = False
+        try:
+            self.browser.refresh()
+        except Exception:  # noqa: BLE001 - the folder may not exist yet
+            pass
+        self._update_control_btn()
+        self._update_scanlist_info()
+        self._show_estimate()
+
+    def _enter_setup(self, setup: str) -> None:
+        """Show *setup* with this account's working state for it (or defaults).  No prompts."""
+        self.setup = setup
+        self.setup_btns[setup].setChecked(True)
+        self.config_list.set_setup(setup)
+        self.trajectory.set_setup(setup)
+        self.calibration.update_setup()                # ignores position replies of the other stage
+        self._apply_working(setup)
+        self.calibration.refresh_positions()
+        self.bd_panel.reload_from_service()            # the active calibration, read from the service
+
+    def _default_operator(self) -> str:
+        return str(self.store.get("default_operator") or (self._session_user or {}).get("full_name") or "")
+
+    def _apply_working(self, setup: str) -> None:
+        ws = self.store.get(working_key(setup))
+        ws = ws if isinstance(ws, dict) else {}
+        self.trajectory.apply_working_state(ws.get("trajectory"))
+        meta = self.trajectory.meta
+        meta.reset(operator=self._default_operator() if ws.get("experiment") is None else "")
+        meta.load_values(ws.get("experiment") or {})
+        meta.load_values(ws.get("optics") or {})
+        self.calibration.timescan.reset()
+        self.calibration.timescan.load(ws.get("calib_scan") or {})
+        name = ws.get("preset")
+        if name in self.configs.get(setup, {}):
+            self._preset_name[setup] = name
+            self._preset_clean[setup] = ws.get("preset_clean") or canonical(self._preset_value())
+        else:
+            self._preset_name[setup] = None
+            self._preset_clean[setup] = None
+        self.config_list.select(self._preset_name[setup], setup)
+        self._last_sample = meta.meta_sample.text().strip()
+        self._update_preset_dirty()
+
+    def _capture_working(self) -> dict:
+        exp, optics = split_metadata(self.trajectory.meta.get_values())
+        return {"v": WORKING_VERSION, "trajectory": self.trajectory.working_state(), "experiment": exp,
+                "optics": optics, "calib_scan": self.calibration.timescan.values(),
+                "preset": self._preset_name[self.setup], "preset_clean": self._preset_clean[self.setup]}
+
+    def _working_changed(self, *_a) -> None:
+        if self._restoring:
+            return
+        self._update_preset_dirty()
+        self._ws_timer.start()
+
+    def _save_working(self) -> None:
+        self._ws_timer.stop()
+        if not self._restoring:
+            self.store.set(working_key(self.setup), self._capture_working())
 
     def _login_logout(self) -> None:
         c = self._client()
@@ -479,6 +619,15 @@ class MainWindow(QMainWindow):
         if self.running:
             QMessageBox.warning(self, "Measurement running", "Stop the measurement before logging out.")
             return
+        if not self.bd_panel.confirm_discard("logging out"):
+            return
+        self._save_working()
+        err = self.store.flush_sync()
+        if err and QMessageBox.question(
+                self, "Log out", f"Your latest changes could not be saved:\n{err}\n\nLog out anyway and lose "
+                "them?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
         try:
             if c.lease_holder:
                 c.release_lease()
@@ -486,14 +635,25 @@ class MainWindow(QMainWindow):
         except ServiceError as exc:
             QMessageBox.warning(self, "Log out", error_text(exc))
             return
-        self.user_lbl.setText("not logged in")
+        self._leave_session("Logged out")
+
+    def _leave_session(self, message: str, expired: bool = False) -> None:
+        """Back to the logged-out state (explicit defaults).  After an expiry the unsaved changes
+        are kept in memory and given back if the same account logs in again."""
+        user = self._session_user
+        if expired and user:
+            self._save_working()
+            pending = self.store.pending()
+            bd = self.bd_panel.draft()
+            if pending or bd:
+                self._stash = {"user": user.get("username"), "prefs": pending,
+                               "bd": dict(bd, setup=self.setup) if bd else None}
+        self._session_user = None
+        self.store.reset({}, enabled=False)
+        self.user_lbl.setText("session expired — log in" if expired else "not logged in")
         self.login_btn.setText("Log in")
-        self.configs = {s: {} for s in SETUPS}
-        for s in SETUPS:
-            self.config_list.set_items(s, [])
-        self.profile.load(None, {})
-        self._update_control_btn()
-        self._log("info", "Logged out")
+        self._apply_session(None, "longitudinal")
+        self._log("warning" if expired else "info", message)
 
     def _on_connection(self, what: str, info: dict) -> None:
         if what == "disconnected":
@@ -502,8 +662,15 @@ class MainWindow(QMainWindow):
         elif what == "restarted":
             self._log("warning", "The device service restarted; log in again.")
         elif what == "session_lost":
-            self.user_lbl.setText("session expired")
-            self.login_btn.setText("Log in")
+            if self._session_user is not None:
+                if self.running:
+                    self._session_lost_pending = True       # reset once the run has ended
+                    self.user_lbl.setText("session expired")
+                    self.login_btn.setText("Log in")
+                else:
+                    self._leave_session(f"Session expired ({info.get('message', '')}); log in again. "
+                                        "Unsaved changes are given back if you log in with the same account.",
+                                        expired=True)
         elif what == "lease_lost":
             self._log("error", "Control of the setup was lost (lease ended).")
             if self.engine is not None and self.running:
@@ -526,6 +693,8 @@ class MainWindow(QMainWindow):
         elif topic == "lease":
             self._update_control_btn(body)
         elif topic.startswith("state."):
+            self.trajectory.hardware.set_device_state(body.get("device", ""), body.get("state", ""),
+                                                      body.get("status", ""))
             if body.get("state") == "FAULT":
                 self._log("error", f"{body.get('device')}: {body.get('status')}")
 
@@ -562,96 +731,237 @@ class MainWindow(QMainWindow):
 
     # ================================================================ setup / workflow
     def set_setup(self, setup: str) -> None:
-        if self.running:
+        """Switch setup: park this setup's working state, bring back the other's (or its
+        defaults) -- never the other setup's draft under this setup's preset name."""
+        if setup == self.setup or setup not in SETUPS:
             self.setup_btns[self.setup].setChecked(True)
             return
-        self.setup = setup
-        self.setup_btns[setup].setChecked(True)
-        self.config_list.set_setup(setup)
-        self.trajectory.set_setup(setup)
-        self.calibration.update_setup()
-        self.calibration.refresh_positions()
-        self._bd_load()
+        if self.running or not self.bd_panel.confirm_discard(
+                f"switching to the {SETUP_LABEL[setup]} setup"):
+            self.setup_btns[self.setup].setChecked(True)
+            return
+        self._save_working()
+        self._restoring = True
+        try:
+            self._enter_setup(setup)
+        finally:
+            self._restoring = False
+        self.store.set("setup", setup)
+        self._update_scanlist_info()
+        self._show_estimate()
 
     def _on_workflow_changed(self, key: str) -> None:
         self.right.configure_for(key)
         self.live_tabs.setCurrentWidget(self.map2d if key == "xy_sweep" else self.plot1d)
 
     # ================================================================ named configurations
-    def _config_value(self) -> dict:
-        meta = self.trajectory.metadata()
-        meta.pop("sample", None)
-        return {"workflow": self.trajectory.current, "params": self.trajectory.params(), "metadata": meta}
+    def _preset_value(self) -> dict:
+        """A configuration = the recipe: workflow, its parameters and the optics -- never the
+        sample identity or the operator (those belong to the experiment)."""
+        _exp, optics = split_metadata(self.trajectory.meta.get_values())
+        return {"schema": PRESET_SCHEMA, "workflow": self.trajectory.current, "params": self.trajectory.params(),
+                "metadata": optics}
+
+    _config_value = _preset_value              # earlier name
+
+    def _update_preset_dirty(self) -> bool:
+        s = self.setup
+        name = self._preset_name[s]
+        dirty = bool(name and self._preset_clean[s] and canonical(self._preset_value()) != self._preset_clean[s])
+        self.config_list.set_dirty(s, name if dirty else None)
+        return dirty
 
     def _reload_configs(self) -> None:
         self.configs = {s: {} for s in SETUPS}
-        try:
-            for p in self._client().call("presets.list", {}):
-                wf = p["workflow"]
-                if wf.startswith("samba_mini/"):
-                    s = wf.split("/", 1)[1]
-                    if s in self.configs:
-                        self.configs[s][p["name"]] = p["value"]
-        except ServiceError as exc:
-            self._log("warning", f"configurations not loaded: {error_text(exc)}")
+        c = self._client()
+        if c.session:
+            try:
+                for p in c.call("presets.list", {}):
+                    wf = p["workflow"]
+                    if wf.startswith("samba_mini/"):
+                        s = wf.split("/", 1)[1]
+                        if s in self.configs:
+                            self.configs[s][p["name"]] = p["value"]
+            except ServiceError as exc:
+                self._log("warning", f"configurations not loaded: {error_text(exc)}")
+                self.config_list.set_status(f"Configurations could not be loaded: {error_text(exc)}", "error")
         for s in SETUPS:
-            self.config_list.set_items(s, sorted(self.configs[s]))
+            if self._preset_name[s] not in self.configs[s]:
+                self._preset_name[s], self._preset_clean[s] = None, None
+            self.config_list.set_items(s, sorted(self.configs[s]), self._preset_name[s])
 
     def _load_config(self, setup: str, name: str) -> None:
+        """A configuration was clicked.  Unsaved changes to the selected one are never dropped
+        silently: Save / Discard / Cancel."""
+        prev = self._preset_name[setup]
         if self.running:
+            self.config_list.select(prev, setup)
             return
+        dirty = setup == self.setup and self._update_preset_dirty()
+        if name == prev and not dirty:
+            return
+        if dirty:
+            what = "reverting to the saved version" if name == prev else f"loading '{name}'"
+            ans = QMessageBox.question(
+                self, "Unsaved configuration changes",
+                f"The current settings differ from the saved configuration '{prev}'.\n\nSave them into '{prev}' "
+                f"before {what}?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+            if ans == QMessageBox.StandardButton.Cancel or (
+                    ans == QMessageBox.StandardButton.Save and not self._save_config(setup, prev, "update")):
+                self.config_list.select(prev, setup)
+                return
         v = self.configs.get(setup, {}).get(name)
         if not v:
+            self.config_list.select(prev, setup)
             return
-        self.trajectory.set_workflow(v.get("workflow", self.trajectory.current))
-        self.trajectory.set_params(v.get("workflow"), v.get("params", {}))
-        meta = dict(v.get("metadata", {}))
-        meta.pop("export_csv", None)
-        if v.get("geometry") and "incidence" not in meta:      # configurations saved before the Samba layout
-            meta["incidence"] = v["geometry"]
-        self.trajectory.set_metadata(meta)
-        self._last_sample = self.trajectory.meta.meta_sample.text().strip()
-        self._log("info", f"Loaded configuration '{name}'")
+        self._apply_preset(setup, name, v)
 
-    def _save_config(self, setup: str, name: str) -> None:
+    def _apply_preset(self, setup: str, name: str, v: dict) -> None:
+        """Fill the widgets from a configuration.  Never applies instrument settings, never
+        changes the sample or operator (legacy configurations that stored them ask first)."""
+        self._restoring = True
+        try:
+            wf = v.get("workflow", self.trajectory.current)
+            self.trajectory.set_workflow(wf)
+            self.trajectory.set_params(wf, v.get("params", {}))
+            meta = dict(v.get("metadata", {}))
+            meta.pop("export_csv", None)
+            if v.get("geometry") and "incidence" not in meta:      # configurations saved before the Samba layout
+                meta["incidence"] = v["geometry"]
+            legacy = {k: meta.pop(k) for k in list(meta) if k in LEGACY_IDENTITY_KEYS}
+            self.trajectory.set_metadata({k: val for k, val in meta.items() if k in OPTICS_KEYS})
+        finally:
+            self._restoring = False
+        self._preset_name[setup] = name
+        self._preset_clean[setup] = canonical(self._preset_value())
+        self.config_list.select(name, setup)
+        self.config_list.clear_error()
+        self._update_preset_dirty()
+        self._save_working()
+        self._show_estimate()
+        self._log("info", f"Loaded configuration '{name}' (settings only; no instrument was changed)")
+        if legacy:
+            self._offer_legacy_identity(name, legacy)
+
+    def _offer_legacy_identity(self, name: str, legacy: dict) -> None:
+        """Configurations saved before this version may hold a sample / operator.  Applying them
+        is an explicit choice, and then it goes through the normal sample-change handling."""
+        if "sample_id" not in legacy and legacy.get("sample") not in (None, ""):
+            legacy["sample_id"] = legacy["sample"]
+        legacy.pop("sample", None)
+        current, _ = split_metadata(self.trajectory.meta.get_values())
+        diff = {k: val for k, val in legacy.items()
+                if k in EXPERIMENT_KEYS and val not in (None, "") and current.get(k) != val}
+        if not diff:
+            return
+        lines = "\n".join(f"  {k}: {val!r}  (now {current.get(k)!r})" for k, val in diff.items())
+        ans = QMessageBox.question(
+            self, "Sample information in this configuration",
+            f"'{name}' was saved by an earlier Samba_mini together with experiment information:\n{lines}\n\n"
+            "Configurations no longer change the current experiment. Copy this information into the current "
+            "experiment?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            self._log("info", f"The sample information stored in '{name}' was not applied.")
+            return
+        self.trajectory.set_metadata(diff)
+        self._log("info", f"Experiment information copied from '{name}': {', '.join(diff)}")
+        self._on_sample_edited(self.trajectory.meta.meta_sample.text().strip())
+
+    def _presets_ok(self, feature: str = "presets-atomic-1") -> bool:
         c = self._client()
         if not c.session:
             self.show_login()
-            return
-        value = self._config_value()
-        try:
-            c.call("presets.save", {"workflow": f"samba_mini/{setup}", "name": name, "value": value})
-        except ServiceError as exc:
-            self._log("error", f"configuration not saved: {error_text(exc)}")
-            return
-        self.configs[setup][name] = value
-        self.config_list.set_items(setup, sorted(self.configs[setup]), name)
-        self._log("info", f"Saved configuration '{name}'")
+            return False
+        if not c.has_feature(feature):
+            self.config_list.set_status("The running device service is older than this Samba_mini: restart it "
+                                        "(Samba_controls) when no measurement runs.", "error")
+            return False
+        return True
 
-    def _copy_config(self, setup: str, new: str) -> None:
-        self._save_config(setup, new)
+    def _save_config(self, setup: str, name: str, mode: str | None = None) -> bool:
+        """+ (mode "create": refuses an existing name) or S (mode "update").  A failed save
+        leaves the settings untouched and the error visible under the list."""
+        c = self._client()
+        if not c.session:
+            self.show_login()
+            return False
+        if mode is None:
+            mode = "update" if name in self.configs.get(setup, {}) else "create"
+        if not c.has_feature("presets-atomic-1"):
+            mode = "overwrite"                    # older service: plain save (no create/update modes)
+        value = self._preset_value()
+        try:
+            c.call("presets.save", {"workflow": f"samba_mini/{setup}", "name": name, "value": value,
+                                    "mode": mode}, 10.0)
+        except ServiceError as exc:
+            self.config_list.set_status(f"'{name}' not saved: {exc.message} — your settings are unchanged.",
+                                        "error")
+            self._log("error", f"configuration '{name}' not saved: {error_text(exc)}")
+            return False
+        self.configs[setup][name] = value
+        self._preset_name[setup] = name
+        self._preset_clean[setup] = canonical(value)
+        self.config_list.set_items(setup, sorted(self.configs[setup]), name)
+        self.config_list.clear_error()
+        self._update_preset_dirty()
+        self._save_working()
+        self._log("info", f"Saved configuration '{name}'")
+        return True
+
+    def _copy_config(self, setup: str, src: str, new: str) -> None:
+        """Copy the *saved* configuration (not the current, possibly edited, settings)."""
+        if not self._presets_ok():
+            return
+        try:
+            res = self._client().call("presets.copy", {"workflow": f"samba_mini/{setup}", "name": src,
+                                                       "new_name": new}, 10.0)
+        except ServiceError as exc:
+            self.config_list.set_status(f"Not copied: {exc.message}", "error")
+            self._log("error", f"configuration not copied: {error_text(exc)}")
+            return
+        self.configs[setup][new] = res["value"]
+        self.config_list.set_items(setup, sorted(self.configs[setup]), self._preset_name[setup])
+        self.config_list.clear_error()
+        self._update_preset_dirty()
+        self._log("info", f"Copied configuration '{src}' to '{new}'")
 
     def _delete_config(self, setup: str, name: str) -> None:
         try:
             self._client().call("presets.delete", {"workflow": f"samba_mini/{setup}", "name": name})
         except ServiceError as exc:
+            self.config_list.set_status(f"Not deleted: {exc.message}", "error")
             self._log("error", error_text(exc))
             return
         self.configs[setup].pop(name, None)
-        self.config_list.set_items(setup, sorted(self.configs[setup]))
+        if self._preset_name[setup] == name:
+            self._preset_name[setup], self._preset_clean[setup] = None, None
+        self.config_list.set_items(setup, sorted(self.configs[setup]), self._preset_name[setup])
+        self._update_preset_dirty()
+        self._save_working()
 
     def _rename_config(self, setup: str, old: str, new: str) -> None:
-        v = self.configs[setup].get(old)
-        if v is None:
+        """Atomic rename in the service; refused (nothing changes) when *new* exists."""
+        if not self._presets_ok():
             return
         try:
-            self._client().call("presets.save", {"workflow": f"samba_mini/{setup}", "name": new, "value": v})
-            self._client().call("presets.delete", {"workflow": f"samba_mini/{setup}", "name": old})
+            res = self._client().call("presets.rename", {"workflow": f"samba_mini/{setup}", "name": old,
+                                                         "new_name": new}, 10.0)
         except ServiceError as exc:
-            self._log("error", error_text(exc))
+            self.config_list.set_status(f"Not renamed: {exc.message}", "error")
+            self._log("error", f"configuration not renamed: {error_text(exc)}")
             return
-        self.configs[setup][new] = self.configs[setup].pop(old)
-        self.config_list.set_items(setup, sorted(self.configs[setup]), new)
+        self.configs[setup].pop(old, None)
+        self.configs[setup][new] = res["value"]
+        if self._preset_name[setup] == old:
+            self._preset_name[setup] = new
+        self.config_list.set_items(setup, sorted(self.configs[setup]), self._preset_name[setup])
+        self.config_list.clear_error()
+        self._update_preset_dirty()
+        self._save_working()
+        self._log("info", f"Renamed configuration '{old}' to '{new}'")
 
     # ================================================================ run control
     def _check_ready(self):
@@ -712,25 +1022,56 @@ class MainWindow(QMainWindow):
         wf, params, n = ready
         if not self._confirm_real(wf, params, wf.title) or not self._take_control():
             return
+        if not self._freeze_calibration():
+            return
         self._sl = None
         self._run_t0 = time.time()
         self._list = {"total": 1, "done": 0}
         self._set_running_ui(True)
         self._launch(wf, params, n)
 
+    def _freeze_calibration(self) -> bool:
+        """Read the active λ/2 calibration from the service (not a cache) and freeze it for the
+        run: the file and the live θ display use this one snapshot until the run ends."""
+        c = self._client()
+        if not c.has_feature("calibration-records-1"):
+            self._run_cal = None
+            self._log("warning", "The running device service is older and has no calibration records: this "
+                      "run records no λ/2 calibration.")
+            return True
+        act = self.bd_panel.refresh_active()
+        if self.bd_panel.active_error:
+            QMessageBox.warning(self, "Calibration", f"The active λ/2 calibration {self.bd_panel.active_error}."
+                                "\nThe run was not started.")
+            return False
+        from Samba_mini.panels.bd_calibration import snapshot
+        self._run_cal = snapshot(act)
+        sample = self.trajectory.meta.meta_sample.text().strip()
+        if self._run_cal and (self._run_cal.get("activated_for_sample") or "") != sample:
+            self._log("warning", f"The active λ/2 calibration was activated for sample "
+                      f"{self._run_cal.get('activated_for_sample')!r}; the current sample is {sample!r}.")
+        if self.bd_panel.is_dirty():
+            self._log("warning", "The BD Calibration editor has unsaved values; they are not used by this run "
+                      "(only the saved, active calibration is).")
+        return True
+
     def _launch(self, wf, params: dict, n: int, extra_meta: dict | None = None, label: str = "",
                 config_name: str | None = None) -> None:
         meta = self.trajectory.metadata()
         data_dir = self._data_dir()
-        notebook = self.prefs.get("lab_notebook") or os.path.join(data_dir, "lab_notebook_SambaMini.csv")
+        notebook = self.store.get("lab_notebook") or os.path.join(data_dir, "lab_notebook_SambaMini.csv")
         em = {k: meta[k] for k in RUN_META_KEYS if k in meta}
         em.update(extra_meta or {})
+        snap = self._run_cal
         req = RunRequest(wf.key, params, setup=self.setup, geometry=meta["incidence"], sample=meta["sample"],
                          operator=meta["operator"], notes=meta["notes"],
                          config_name=(config_name if config_name is not None
                                       else self.config_list.current_name() or ""), save_dir=data_dir,
-                         export_csv=bool(self.prefs.get("export_csv", False)), lab_notebook=notebook,
-                         extra_metadata=em, bd_calibration=self.bd_panel.get_calibration())
+                         export_csv=bool(self.store.get("export_csv", False)), lab_notebook=notebook,
+                         extra_metadata=em, bd_calibration=list(snap["values"]) if snap else None,
+                         bd_calibration_record=dict(snap) if snap else None)
+        self._push_kerr_calibration(snap["values"] if snap else [0.0] * 6)   # display = file
+        self.bd_panel.set_running(True, snap)
         self._prepare_plots(wf.key, params, n)
         self.engine = ScanEngine(self._client(), req, self.engine_bridge.callbacks())
         self._scan_t0 = time.time()
@@ -746,10 +1087,26 @@ class MainWindow(QMainWindow):
                   + (" — the stage can be moved meanwhile" if stage_free else ""))
 
     # ---------------------------------------------------------------- calibration time scan
+    def calibration_scan_params(self) -> dict:
+        """Exactly what the calibration time scan applies: the Calibration tab's own settings
+        (samples, interval, Int, coil, lock-in) on top of the time scan's defaults; no stage move.
+        Nothing comes from the Trajectory tab."""
+        ts = self.calibration.timescan.values()
+        params = WORKFLOWS["time"].defaults()
+        params.update({k: ts[k] for k in ("b", "volt", "sensi", "lockin_freq", "time_const", "phase")})
+        params.update(duration=round(ts["n"] * ts["interval"], 9), interval=ts["interval"],
+                      acq_time=ts["acq_time"], position_stage=False)
+        return params
+
+    def _copy_hardware_to_calibration_scan(self) -> None:
+        hw = self.trajectory.hardware
+        v = dict(hw.lockin_values(), b=hw.coil.value())
+        self.calibration.timescan.load(v)
+        self._log("info", "Calibration scan: coil and lock-in values copied from the Hardware box.")
+
     def start_calibration_scan(self) -> None:
-        """Samba's calibration time scan: the Calibration tab's own samples / interval / Int, the
-        Trajectory tab's lock-in and coil settings of the time scan, no stage move.  The file is
-        named ..._calibration.h5 so the BD Calibration tab's Fit & Import finds it."""
+        """Samba's calibration time scan with the Calibration tab's own settings.  The file is
+        named ..._calibration.h5; when it completes it is fitted in the BD Calibration tab."""
         if self.running:
             return
         c = self._client()
@@ -760,24 +1117,18 @@ class MainWindow(QMainWindow):
         if not c.session and not self.show_login():
             return
         wf = WORKFLOWS["time"]
-        ts = self.calibration.timescan.values()
-        params = dict(self.trajectory.params("time"))
-        params.update(duration=round(ts["n"] * ts["interval"], 9), interval=ts["interval"],
-                      acq_time=ts["acq_time"], position_stage=False)
         try:
-            params = wf.coerce(params)
+            params = wf.coerce(self.calibration_scan_params())
         except ValueError as exc:
-            QMessageBox.warning(self, "Invalid parameters", f"{exc}\n\n(Lock-in and coil settings come from "
-                                "the Trajectory tab's time scan.)")
+            QMessageBox.warning(self, "Invalid parameters", f"{exc}\n\n(The settings are in the Calibration "
+                                "tab's calibration-scan box.)")
             return
         n = plans.time_points(params["duration"], params["interval"])
         if not self._confirm_real(wf, params, "a calibration time scan") or not self._take_control():
             return
-        try:
-            c.call("prefs.set", {"values": {"calib_timescan": ts}})
-            self.prefs["calib_timescan"] = ts
-        except ServiceError:
-            pass
+        if not self._freeze_calibration():
+            return
+        self._save_working()
         self._sl = None
         self._calib_run = True
         self._run_t0 = time.time()
@@ -801,6 +1152,8 @@ class MainWindow(QMainWindow):
             return
         what = f"a scanlist of {sv['n_scans']} × {wf.title}"
         if not self._confirm_real(wf, params, what) or not self._take_control():
+            return
+        if not self._freeze_calibration():          # one calibration snapshot for the whole scanlist
             return
         self._sl = {"wf": wf, "params": params, "n": n, "i": 0, "total": sv["n_scans"], "flip": sv["field_flip"],
                     "order": sv["order"], "name": sv["name"], "results": [], "stop": False,
@@ -938,12 +1291,36 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._next_scan)
                 return
             self._finish_scanlist()
+        was_calib = self._calib_run
         self._calib_run = False
         self._set_running_ui(False)
         self._run_state = "IDLE"
         self._tint("IDLE")
+        self._run_cal = None
+        self.bd_panel.set_running(False)
+        self._on_active_calibration(self.bd_panel.active())      # the display follows the active one again
         self._update_status_bar()
         self._show_estimate()
+        if self._session_lost_pending:
+            self._session_lost_pending = False
+            self._leave_session("Session expired during the measurement; log in again. Unsaved changes are "
+                                "given back if you log in with the same account.", expired=True)
+            return
+        if was_calib:
+            if status == "completed" and result.get("path"):
+                QTimer.singleShot(0, lambda p=result["path"]: self._fit_acquired_calibration(p))
+            else:
+                self._log("warning", f"Calibration scan {status}: not fitted. Use Fit & Import… in the BD "
+                          "Calibration tab to choose a file explicitly.")
+
+    def _fit_acquired_calibration(self, path: str) -> None:
+        """② of the calibration workflow: fit the scan just acquired, for review."""
+        if self.bd_panel.import_file(path, auto=True):
+            self.bottom_tabs.setCurrentWidget(self.bd_panel)
+            self._log("info", f"Calibration scan fitted: review the values in the BD Calibration tab, then Save "
+                      f"and Activate ({os.path.basename(path)}).")
+        else:
+            self._log("warning", f"Calibration scan not fitted: {self.bd_panel.status_text()}")
 
     # ---------------------------------------------------------------- BD calibration / θ display
     def _push_kerr_calibration(self, vals: list) -> None:
@@ -951,52 +1328,49 @@ class MainWindow(QMainWindow):
         self.map2d.set_kerr_calibration(vals)
 
     def _on_kerr_toggled(self, enabled: bool) -> None:
-        c = self._client()
-        if c.session:
-            call_async(lambda: c.call("prefs.set", {"values": {"kerr_display": bool(enabled)}}),
-                       None, lambda e: None)
+        if not self._restoring:
+            self.store.set("kerr_display", bool(enabled))
 
-    def _bd_save(self, vals: list) -> None:
-        c = self._client()
-        if not c.session:
-            self.show_login()
+    def _on_active_calibration(self, active) -> None:
+        """The active calibration changed (or was read).  While a run is going its display stays
+        on the snapshot the run started with -- the same values its file records."""
+        if self.running:
+            if not self._restoring:
+                self._log("info", "Active calibration changed: it applies from the next run; the running "
+                          "measurement keeps the one it started with.")
             return
-        date = time.strftime("%Y-%m-%d %H:%M")
-        values = {f"bd_calibration_{self.setup}": [float(v) for v in vals],
-                  f"bd_calibration_date_{self.setup}": date}
-        try:
-            c.call("prefs.set", {"values": values})
-        except ServiceError as exc:
-            self.bd_panel.set_status(f"Not saved: {error_text(exc)}")
-            return
-        self.prefs.update(values)
-        self.bd_panel.set_status(f"Saved {date} for the {SETUP_LABEL[self.setup]} setup (your account).")
-
-    def _bd_load(self, announce: bool = False) -> None:
-        """The setup's saved calibration (zeros = none, so the previous setup's never leaks)."""
-        vals = self.prefs.get(f"bd_calibration_{self.setup}")
-        date = self.prefs.get(f"bd_calibration_date_{self.setup}", "")
-        if isinstance(vals, list) and len(vals) == 6:
-            self.bd_panel.load_calibration(vals)
-            self.bd_panel.set_status(f"Loaded the calibration saved {date} for the {SETUP_LABEL[self.setup]} setup.")
-        else:
-            self.bd_panel.load_calibration([0.0] * 6)
-            self.bd_panel.set_status(f"No BD calibration saved for the {SETUP_LABEL[self.setup]} setup yet.")
-            if announce:
-                QMessageBox.information(self, "No saved calibration",
-                                        "No calibration has been saved for this setup yet.")
+        rec = (active or {}).get("record")
+        self._push_kerr_calibration(rec["values"] if rec else [0.0] * 6)
 
     def _on_sample_edited(self, name: str) -> None:
-        """Samba: a new sample asks whether to start a fresh λ/2 calibration."""
+        """Samba: a new sample asks for a fresh λ/2 calibration.  Here: the active calibration
+        (activated for another sample) can be deactivated -- persistently, in the service, so a
+        setup switch or a restart does not bring it back."""
         if not name or name == self._last_sample:
+            self.bd_panel.context_changed()
             return
         self._last_sample = name
-        ans = QMessageBox.question(self, "New sample", f"Sample changed to '{name}' — start a new BD "
-                                   "calibration?\n\nThe six values are cleared (zeros = no calibration in the "
-                                   "files) until you enter or fit new ones.")
-        if ans == QMessageBox.StandardButton.Yes:
-            self.bd_panel.load_calibration([0.0] * 6)
-            self.bd_panel.set_status(f"New sample '{name}': enter or fit the λ/2 calibration, then Save.")
+        self._working_changed()
+        self.bd_panel.context_changed()
+        act = self.bd_panel.active()
+        if act is None or (act.get("sample_id") or "") == name:
+            return
+        ans = QMessageBox.question(
+            self, "New sample",
+            f"Sample changed to '{name}'. The active λ/2 calibration "
+            f"({describe_record(act.get('record'), short=True)}) was activated for "
+            f"{repr(act.get('sample_id')) if act.get('sample_id') else 'no particular sample'}.\n\n"
+            f"Start a new calibration? The active one is deactivated, so measurements of '{name}' record "
+            "no calibration until you acquire, save and activate a new one.")
+        if ans != QMessageBox.StandardButton.Yes:
+            self._log("info", f"Sample '{name}': kept the active calibration {describe_record(act.get('record'), short=True)}.")
+            return
+        if not self.bd_panel.confirm_discard("starting a new calibration"):
+            return
+        if self.bd_panel.deactivate():
+            self.bd_panel.new_editor()
+            self.bd_panel.set_status(f"New sample '{name}': acquire (Calibration tab) or enter the λ/2 "
+                                     "calibration, then Save and Activate.")
             self.bottom_tabs.setCurrentWidget(self.bd_panel)
 
     def _update_scanlist_info(self) -> None:
@@ -1157,6 +1531,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1180, 640)
 
     def closeEvent(self, ev) -> None:
+        if self._client().session and not self.bd_panel.confirm_discard("closing Samba_mini"):
+            ev.ignore()
+            return
         if self.running:
             ans = QMessageBox.question(self, "Measurement running",
                                        "A measurement is running. Abort it and close Samba_mini?\n"
@@ -1170,16 +1547,25 @@ class MainWindow(QMainWindow):
             while self.running and time.time() - t0 < 120:
                 loop.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 100)
                 time.sleep(0.05)
-        QSettings("ETH-Intermag", "SambaMini").setValue("geometry", self.saveGeometry())
         c = self._client()
+        if c.session:
+            self._save_working()
+            err = self.store.flush_sync()
+            if err and QMessageBox.question(
+                    self, "Close Samba_mini", f"Your latest changes could not be saved:\n{err}\n\nClose anyway "
+                    "and lose them?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                ev.ignore()
+                return
+        QSettings("ETH-Intermag", "SambaMini").setValue("geometry", self.saveGeometry())
         try:
             if c.session:
                 if c.lease_holder:
                     c.release_lease()
-                c.call("prefs.set", {"values": {"setup": self.setup}})
                 c.logout()
         except ServiceError:
             pass
+        self.store.reset({}, enabled=False)
         self.bridge.close()
         super().closeEvent(ev)
 
