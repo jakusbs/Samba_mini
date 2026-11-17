@@ -167,13 +167,25 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   still switch them off.  The start message lists only what a run does; the
   status bar shows the coil.  Simulation only.
 
+* 2026-11-17 — **Calibration tab, one Settle, sensitivity in mV** (branch
+  `feature/calibration-panel-stage-units`, from `main` at `47c3782`).
+  Configurations saved with a sample by an earlier version no longer ask
+  on every click (ignored, one log line).  Spatial scans have one Settle
+  after every move and coil change (was Settle + B settle); time scans
+  settle once before the first sample.  The calibration scan box keeps
+  Points, Int and Settle and measures with the coil and lock-in as they are.
+  The 7270 sensitivity is picked from its ranges in mV.  The stage jog in
+  the Calibration tab is in µm; *Alignment…* opens a mm window for coarse
+  moves.  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **140 passed** (≈170 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **146 passed** (≈200 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
 engine 13, drivers 14, core 16, recovery 4, process 2, GUI 16, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 15,
-device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4.
+device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4,
+settle/calibration box/units 6.
 See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
@@ -255,7 +267,7 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
    compare a DC loop with MiniMoke on the same sample.  Confirm the AO holds
    the last sample after a finite generation.
 4. **Coil amplifier:** measure the current per volt (`coil.amps_per_volt`)
-   and the coil time constant; choose `field_settle_s` and confirm the B-sweep
+   and the coil time constant; choose the Settle and confirm the B-sweep
    5 % settle fraction is enough.  Confirm instant zeroing at cleanup is
    acceptable for the amplifier (MiniMoke always did it).
 5. **Lock-in:** REFMODE 0 + configure sequence; SEN/TC rounding; `XY.` reads;

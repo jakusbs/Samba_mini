@@ -52,7 +52,7 @@ from Samba_mini.panels.profile import ProfilePanel
 from Samba_mini.panels.right_panel import RightPanel
 from Samba_mini.panels.scanlist import ScanlistPanel
 from Samba_mini.panels.trajectory import TrajectoryPanel
-from Samba_mini.state import (EXPERIMENT_KEYS, LEGACY_IDENTITY_KEYS, OPTICS_KEYS, PRESET_SCHEMA, WORKING_VERSION,
+from Samba_mini.state import (LEGACY_IDENTITY_KEYS, OPTICS_KEYS, PRESET_SCHEMA, WORKING_VERSION,
                               PrefsStore, canonical, split_metadata, working_key)
 
 
@@ -331,7 +331,6 @@ class MainWindow(QMainWindow):
         self.trajectory.changed.connect(self._update_scanlist_info)
         self.trajectory.changed.connect(self._working_changed)
         self.calibration.timescan.changed.connect(self._working_changed)
-        self.calibration.timescan.copy_requested.connect(self._copy_hardware_to_calibration_scan)
         self.scanlist.changed.connect(self._update_scanlist_info)
         self.config_list.config_selected.connect(lambda *_a: self._update_scanlist_info())
         self.right.plot_changed.connect(self._apply_plot_config)
@@ -899,7 +898,9 @@ class MainWindow(QMainWindow):
 
     def _apply_preset(self, setup: str, name: str, v: dict) -> None:
         """Fill the widgets from a configuration.  Never applies instrument settings, never
-        changes the sample or operator (legacy configurations that stored them ask first)."""
+        changes the sample or operator: configurations saved by an earlier Samba_mini with a
+        sample / operator in them load without it (one log line; saving the configuration
+        drops it)."""
         self._restoring = True
         try:
             wf = v.get("workflow", self.trajectory.current)
@@ -923,33 +924,11 @@ class MainWindow(QMainWindow):
         self._save_working()
         self._show_estimate()
         self._log("info", f"Loaded configuration '{name}' (settings only; no instrument was changed)")
-        if legacy:
-            self._offer_legacy_identity(name, legacy)
-
-    def _offer_legacy_identity(self, name: str, legacy: dict) -> None:
-        """Configurations saved before this version may hold a sample / operator.  Applying them
-        is an explicit choice, and then it goes through the normal sample-change handling."""
-        if "sample_id" not in legacy and legacy.get("sample") not in (None, ""):
-            legacy["sample_id"] = legacy["sample"]
-        legacy.pop("sample", None)
-        current, _ = split_metadata(self.trajectory.meta.get_values())
-        diff = {k: val for k, val in legacy.items()
-                if k in EXPERIMENT_KEYS and val not in (None, "") and current.get(k) != val}
-        if not diff:
-            return
-        lines = "\n".join(f"  {k}: {val!r}  (now {current.get(k)!r})" for k, val in diff.items())
-        ans = QMessageBox.question(
-            self, "Sample information in this configuration",
-            f"'{name}' was saved by an earlier Samba_mini together with experiment information:\n{lines}\n\n"
-            "Configurations no longer change the current experiment. Copy this information into the current "
-            "experiment?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if ans != QMessageBox.StandardButton.Yes:
-            self._log("info", f"The sample information stored in '{name}' was not applied.")
-            return
-        self.trajectory.set_metadata(diff)
-        self._log("info", f"Experiment information copied from '{name}': {', '.join(diff)}")
-        self._on_sample_edited(self.trajectory.meta.meta_sample.text().strip())
+        stored = {k: val for k, val in legacy.items() if val not in (None, "")}
+        if stored:
+            what = ", ".join(f"{k} {val!r}" for k, val in stored.items())
+            self._log("info", f"'{name}' was saved by an earlier Samba_mini with sample information ({what}); "
+                      "ignored -- configurations do not change the sample. Saving the configuration removes it.")
 
     def _presets_ok(self, feature: str = "presets-atomic-1") -> bool:
         c = self._client()
@@ -1072,14 +1051,15 @@ class MainWindow(QMainWindow):
             return None
         return wf, params, n
 
-    def _confirm_real(self, wf, params: dict, what: str) -> bool:
+    def _confirm_real(self, wf, params: dict, what: str, coil_as_is: bool = False) -> bool:
         if (self.bridge.hello_info or {}).get("mode") != "real":
             return True
-        text = f"Start {what} on the REAL setup?\n\n" + self.start_summary(wf, params)
+        text = f"Start {what} on the REAL setup?\n\n" + self.start_summary(wf, params, coil_as_is=coil_as_is)
         return QMessageBox.question(self, "Real hardware", text) == QMessageBox.StandardButton.Yes
 
-    def start_summary(self, wf, params: dict, channels: list | None = None) -> str:
-        """What a run will do to the instruments -- exactly, nothing it will not do."""
+    def start_summary(self, wf, params: dict, channels: list | None = None, coil_as_is: bool = False) -> str:
+        """What a run will do to the instruments -- exactly, nothing it will not do.
+        ``coil_as_is``: the run measures with the coil as it is (the calibration time scan)."""
         keep = True
         c = self._client()
         if c.has_feature("coil-keep-1"):
@@ -1095,6 +1075,8 @@ class MainWindow(QMainWindow):
         if wf.key in ("b_sweep_dc", "b_sweep_lockin"):
             lines.append(f"• The coil is swept between {params['b_min']:+.4g} V and {params['b_max']:+.4g} V"
                          + ("; afterwards it returns to its present value." if keep else "; afterwards 0 V."))
+        elif coil_as_is:
+            lines.append(f"• The coil is left as it is ({float(params.get('b', 0.0)):+.4g} V).")
         else:
             b = float(params.get("b", 0.0))
             flip = wf.key in ("x_sweep", "y_sweep") and b != 0.0
@@ -1203,22 +1185,33 @@ class MainWindow(QMainWindow):
                   + (" — the stage can be moved meanwhile" if stage_free else ""))
 
     # ---------------------------------------------------------------- calibration time scan
-    def calibration_scan_params(self) -> dict:
-        """Exactly what the calibration time scan applies: the Calibration tab's own settings
-        (samples, interval, Int, coil, lock-in) on top of the time scan's defaults; no stage move.
-        Nothing comes from the Trajectory tab."""
+    def calibration_scan_params(self, coil_V: float) -> dict:
+        """The calibration time scan: the Calibration tab's Points, Int and Settle, samples back
+        to back (as in Samba), no stage move.  It measures with the coil as it is (*coil_V*, read
+        from the DAQ just before) and the lock-in as it is set; the lock-in values are the Hardware
+        box's only so the run can say when the lock-in differs from them."""
         ts = self.calibration.timescan.values()
         params = WORKFLOWS["time"].defaults()
-        params.update({k: ts[k] for k in ("b", "volt", "sensi", "lockin_freq", "time_const", "phase")})
-        params.update(duration=round(ts["n"] * ts["interval"], 9), interval=ts["interval"],
-                      acq_time=ts["acq_time"], position_stage=False)
+        params.update(self.trajectory.hardware.lockin_values())
+        params.update(b=float(coil_V), duration=round(ts["n"] * ts["acq_time"], 9), interval=ts["acq_time"],
+                      acq_time=ts["acq_time"], settle_time=ts["settle_time"], position_stage=False)
         return params
 
-    def _copy_hardware_to_calibration_scan(self) -> None:
-        hw = self.trajectory.hardware
-        v = dict(hw.lockin_values(), b=hw.coil.value())
-        self.calibration.timescan.load(v)
-        self._log("info", "Calibration scan: coil and lock-in values copied from the Hardware box.")
+    def _coil_now(self) -> tuple[float | None, str]:
+        """(the coil command the DAQ outputs now, note).  None: the DAQ could not be asked.  The
+        DAQ cannot read its output back, so until something sets the coil after the service
+        started it is unknown -- and then 0 V, which the service leaves when it stops."""
+        try:
+            r = self._client().device("daq").read("coil_command_V")["coil_command_V"]
+        except (ServiceError, KeyError, OSError) as exc:
+            return None, error_text(exc) if isinstance(exc, ServiceError) else str(exc)
+        try:
+            v = float(r.value)
+        except (TypeError, ValueError):
+            v = math.nan
+        if r.valid and math.isfinite(v):
+            return v, ""
+        return 0.0, "the coil has not been set since the device service started; it is at 0 V"
 
     def start_calibration_scan(self) -> None:
         """Samba's calibration time scan with the Calibration tab's own settings.  The file is
@@ -1233,14 +1226,23 @@ class MainWindow(QMainWindow):
         if not c.session and not self.show_login():
             return
         wf = WORKFLOWS["time"]
+        coil, note = self._coil_now()
+        if coil is None:
+            QMessageBox.warning(self, "Calibration scan", f"The coil command could not be read from the DAQ "
+                                f"({note}), so the scan cannot keep the coil as it is. Check the DAQ in "
+                                "Samba_controls.")
+            return
+        if note:
+            self._log("info", f"Calibration scan: {note}.")
         try:
-            params = wf.coerce(self.calibration_scan_params())
+            params = wf.coerce(self.calibration_scan_params(coil))
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid parameters", f"{exc}\n\n(The settings are in the Calibration "
                                 "tab's calibration-scan box.)")
             return
         n = plans.time_points(params["duration"], params["interval"])
-        if not self._confirm_real(wf, params, "a calibration time scan") or not self._take_control():
+        if (not self._confirm_real(wf, params, "a calibration time scan", coil_as_is=True)
+                or not self._take_control()):
             return
         if not self._freeze_calibration():
             return
@@ -1251,7 +1253,7 @@ class MainWindow(QMainWindow):
         self._list = {"total": 1, "done": 0}
         self._set_running_ui(True)
         self.calibration.begin_scan(params["duration"], f"Calibration time scan: {n} samples, "
-                                    f"{params['interval']:g} s apart, Int {params['acq_time']:g} s")
+                                    f"Int {params['acq_time']:g} s, settle {params['settle_time']:g} s")
         chans = self.right.selected_for("time")         # the time scan's rows, whatever is shown
         if not any(c["id"] == "dc_signal" for c in chans):
             bd = self.right.info("dc_signal")

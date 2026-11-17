@@ -49,10 +49,23 @@ HALL_PARAM = Param("record_hall", "Record Hall field", "", "bool", True, group="
                    help="Read the Hall probe at every point (MiniMoke always did)")
 STAGE_PARAM = Param("position_stage", "Move stage to (x, y) first", "", "bool", True, group="Position",
                     help="MiniMoke moved the stage to (x, y) before field sweeps and time traces")
-FIELD_SETTLE = Param("field_settle_s", "Field settle after field change", "s", default=1.0, min=0.0,
-                     max=60.0, decimals=3, group="Acquisition",
-                     help="hardware-timed wait after the coil command changes (MiniMoke waited 1 s "
-                          "after the initial field only)")
+SETTLE = Param("settle_time", "Settle", "s", default=1.0, min=0.0, max=60.0, decimals=3, group="Acquisition",
+               help="wait before measuring: after every stage move and coil change (spatial scans), "
+                    "once before the first sample (time scans)")
+
+
+def migrate_params(values: dict) -> dict:
+    """Parameters saved by an earlier Samba_mini: spatial scans had two waits, "Settle time after
+    move" (settle_time) and "Field settle after field change" (field_settle_s).  There is one
+    Settle now, used after either; it takes the longer of the two."""
+    v = dict(values or {})
+    if "field_settle_s" in v:
+        old = v.pop("field_settle_s")
+        try:
+            v["settle_time"] = max(float(v.get("settle_time", 0.0) or 0.0), float(old))
+        except (TypeError, ValueError):
+            pass
+    return v
 
 
 @dataclass
@@ -79,6 +92,7 @@ class Workflow:
 
     def coerce(self, values: dict) -> dict:
         """Fill defaults, coerce types and enforce limits.  Raises ValueError."""
+        values = migrate_params(values)
         out = {}
         for p in self.params:
             v = values.get(p.name, p.default)
@@ -157,12 +171,7 @@ _add(Workflow(
     description="Field sweeps with the 7270 oscillator modulating the sample current; X/Y read per point.",
 ))
 
-_POS_COMMON = [
-    FIELD_SETTLE,
-    Param("settle_time", "Settle time after move", "s", default=0.0, min=0.0, max=60.0, decimals=3,
-          group="Acquisition"),
-    HALL_PARAM,
-]
+_POS_COMMON = [SETTLE, HALL_PARAM]
 
 _add(Workflow(
     "x_sweep", "X-sweep", "X", "SPATIAL_X",
@@ -219,7 +228,7 @@ _add(Workflow(
         *_lockin_params(volt=0.0, acq=0.5),
         Param("x", "Position x", "um", default=0.0, min=-1e6, max=1e6, decimals=3, group="Position"),
         Param("y", "Position y", "um", default=0.0, min=-1e6, max=1e6, decimals=3, group="Position"),
-        STAGE_PARAM, HALL_PARAM,
+        STAGE_PARAM, SETTLE, HALL_PARAM,
     ],
     uses_lockin=True, uses_stage="optional", x_key="time", minimoke_name="Time",
 ))

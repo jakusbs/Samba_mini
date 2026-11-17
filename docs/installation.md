@@ -118,7 +118,14 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
   control; the service aborts its operation and runs the cleanup before anyone
   else can take control.
 * **Lock-in:** set it with *Apply now* (Hardware box) or in Samba_controls;
-  measurements read it as it is set and never change or switch it off.
+  measurements read it as it is set and never change or switch it off.  The
+  sensitivity is one of the 7270's ranges, picked from a list in mV.
+* **Settle** (Timing box): the wait before measuring -- after every stage move
+  and coil change in spatial scans, once before the first sample of a time
+  scan.  The Calibration tab's scan has Points, Int and Settle; it takes its
+  samples back to back with the coil and lock-in as they are.
+* **Stage positioning** (Calibration tab): the digit jog is in µm (10 mm … 10
+  nm); *Alignment…* opens the same stage in mm (10 mm … 1 µm) for coarse moves.
 * **Coil:** keeps running between measurements (a field sweep returns to the
   value it started from); *Zero outputs* switches it off.  The status bar shows
   "Coil: … V ON" while it is on.  `[cleanup] coil_after_run = "zero"` in

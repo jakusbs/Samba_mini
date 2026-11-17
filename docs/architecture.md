@@ -265,6 +265,15 @@ the owners' workers).  Logical devices never open hardware themselves.
   unchanged (MiniMoke behaviour); pacing resumes from the pause.
 * **Abort** stops at the next point boundary (moves are stopped with the
   controller's stop command), then runs cleanup; no move back to the start.
+* **Settle:** one wait before measuring (`settle_time`).  Spatial scans settle
+  after every stage move and every coil change (hardware timed on the DAQ, between
+  setting the coil and acquiring); time scans settle once before the first sample.
+  Parameters saved with the earlier two waits (`settle_time` after moves,
+  `field_settle_s` after coil changes) take the longer of the two.  Field sweeps
+  keep their own per-point settle (from the sweep frequency / 5 τ).
+* **Calibration time scan:** Points, Int and Settle from the Calibration tab;
+  samples back to back (interval = Int, as in Samba); it measures with the coil
+  as it is (read from the DAQ just before) and the lock-in as it is set.
 * **Lock-in:** measurements never configure it -- only "Apply now" (Hardware
   box) or Samba_controls does; a run reads its settings before it starts (the
   lock-in B-sweep settles for the lock-in's real time constant), records them

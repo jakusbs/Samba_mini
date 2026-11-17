@@ -666,11 +666,22 @@ class ScanEngine:
         return plans.xy_points(p["x_min"], p["x_max"], p["x_step"], p["y_min"], p["y_max"], p["y_step"],
                                p["b"], p["repeat_num"])
 
-    def _initial_field(self, coil_V: float) -> None:
-        """MiniMoke: if the first field is not zero, set it and wait 1 s."""
-        if coil_V != 0:
+    def _initial_field(self, coil_V: float, wait: bool = True) -> None:
+        """Set the coil command a run starts with.  Field sweeps wait 1 s afterwards (MiniMoke);
+        spatial and time scans wait their Settle instead (``wait=False``).  The coil keeps running
+        between measurements, so it is set whenever it differs from the value before the run --
+        also when the run starts at 0 V."""
+        before = self._coil_before
+        if coil_V == 0 and (before == 0 or not math.isfinite(before)):
+            return                                   # already off (or unknown: MiniMoke left it)
+        if coil_V == before:
+            return
+        if wait:
             self._log("info", f"Setting coil command to {coil_V:+.4g} V, waiting {INITIAL_FIELD_WAIT_S:g} s")
-            self._rpc(lambda: self._dev("daq").command("set_outputs", coil_V=coil_V), "set coil")
+        else:
+            self._log("info", f"Setting coil command to {coil_V:+.4g} V")
+        self._rpc(lambda: self._dev("daq").command("set_outputs", coil_V=coil_V), "set coil")
+        if wait:
             self._sleep(INITIAL_FIELD_WAIT_S)
 
     def _move_xy_um(self, x_um: float, y_um: float) -> tuple[float, float]:
@@ -924,16 +935,16 @@ class ScanEngine:
             pts, xs, ys = self._position_points()
         else:
             pts, values = self._position_points()
-        self._writer.set_metadata(field_settle_s=p["field_settle_s"])
         record_hall = self.read_hall
         if record_hall:
             self._prepare_hall(plans.hall_integration_for(p["acq_time"]))
-        self._initial_field(p["b"])
+        self._initial_field(p["b"], wait=False)
         first = pts[0]
         self._move_xy_um(first.x_um, first.y_um)
         stage = self._dev(f"stage_{self.req.setup}")
         last_x, last_y = first.x_um, first.y_um
         last_coil = p["b"]
+        pending_settle = True                    # the move to the first point (and the coil just set)
         read_x, read_y = self._last_xy_um
         n_cols = len(xs) if self.wf.key == "xy_sweep" else 0
         k = 0
@@ -950,9 +961,10 @@ class ScanEngine:
                     r = self._rpc(lambda: stage.command("move_to", axis="y", position_mm=pt.y_um / UM_PER_MM),
                                   "move y")
                     read_y, last_y, moved = r["position_mm"] * UM_PER_MM, pt.y_um, True
-                if moved and p["settle_time"] > 0:
-                    self._sleep(p["settle_time"])
-                settle = p["field_settle_s"] if pt.coil_V != last_coil else 0.0
+                # One Settle after anything changed: a stage move or the coil command (hardware
+                # timed on the DAQ, between setting the coil and acquiring).
+                changed = pending_settle or moved or pt.coil_V != last_coil
+                settle = p["settle_time"] if changed else 0.0
                 token = f"{k}"
                 rec = self._rpc(lambda: self._dev("moke").command(
                     "measure_point", coil_V=pt.coil_V, acq_time_s=p["acq_time"], settle_s=settle,
@@ -961,6 +973,7 @@ class ScanEngine:
                 if rec.get("token") != token:
                     raise ServiceError(ErrorCode.INTERNAL, "stale point rejected (token mismatch)")
                 last_coil = pt.coil_V
+                pending_settle = False
             except ServiceError as exc:
                 if exc.code == ErrorCode.CANCELLED or self._abort.is_set():
                     self._check()
@@ -969,6 +982,7 @@ class ScanEngine:
                     raise
                 # Positions after a failed move are unknown: re-command absolute targets.
                 last_x = last_y = math.nan
+                pending_settle = True
                 self._auto_pause(f"Hardware error at point {k + 1}/{len(pts)}: {exc.message} - PAUSED. "
                                  "Fix the cause, then Resume to retry this point, or Abort.")
                 continue
@@ -1002,11 +1016,14 @@ class ScanEngine:
         record_hall = self.read_hall
         if record_hall:
             self._prepare_hall(plans.hall_integration_for(p["acq_time"]))
-        self._initial_field(p["b"])
+        self._initial_field(p["b"], wait=False)
         x_um = y_um = math.nan
         if p.get("position_stage"):
             x_um, y_um = self._move_xy_um(p["x"], p["y"])
         self._writer.set_metadata(position_x_um=x_um, position_y_um=y_um)
+        if p.get("settle_time", 0.0) > 0:
+            self._log("info", f"Settling {p['settle_time']:g} s before the first sample")
+            self._sleep(p["settle_time"])
         op = self._rpc(lambda: self._dev("moke").start_operation(
             "time_trace", coil_V=p["b"], n_points=n, interval_s=p["interval"], acq_time_s=p["acq_time"],
             hall=record_hall, lockin=self.read_lockin), "start time trace")
