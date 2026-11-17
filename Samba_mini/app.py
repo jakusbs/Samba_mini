@@ -895,7 +895,10 @@ class MainWindow(QMainWindow):
         silently: Save / Discard / Cancel."""
         prev = self._preset_name[setup]
         if self.running:
+            # A configuration can switch the measurement type and channels the running plots use.
             self.config_list.select(prev, setup)
+            self.config_list.set_status(f"'{name}' not loaded: a measurement is running. Load it when it "
+                                        "has ended (saving, copying and renaming work meanwhile).")
             return
         dirty = setup == self.setup and self._update_preset_dirty()
         if name == prev and not dirty:
@@ -1171,8 +1174,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _launch(self, wf, params: dict, n: int, extra_meta: dict | None = None, label: str = "",
-                config_name: str | None = None, channels: list | None = None) -> None:
-        meta = self.trajectory.metadata()
+                config_name: str | None = None, channels: list | None = None, meta: dict | None = None) -> None:
+        # A scanlist passes the metadata it started with: the fields stay editable during runs.
+        meta = dict(meta) if meta is not None else self.trajectory.metadata()
         chans = list(channels) if channels is not None else self.right.selected()
         self._run_channels = chans
         params = dict(params)
@@ -1302,6 +1306,8 @@ class MainWindow(QMainWindow):
             return
         self._sl = {"wf": wf, "params": params, "n": n, "i": 0, "total": sv["n_scans"], "flip": sv["field_flip"],
                     "channels": self.right.selected(),             # the same channels for every scan
+                    # ... and the same metadata and configuration name: both stay editable during runs.
+                    "meta": self.trajectory.metadata(), "config": self.config_list.current_name() or "",
                     "order": sv["order"], "name": sv["name"], "results": [], "stop": False,
                     "dir": os.path.join(self._data_dir(), f"ScanLists_{SETUP_LABEL[self.setup]}")}
         self._run_t0 = time.time()
@@ -1330,7 +1336,7 @@ class MainWindow(QMainWindow):
             label += f", field {phase_label(phase)} (coil {params['b']:+.4g} V)"
         self._launch(sl["wf"], params, sl["n"], {"scanlist_name": sl["name"], "scanlist_index": i + 1,
                                                  "scanlist_phase": phase_label(phase)}, label,
-                     channels=sl["channels"])
+                     config_name=sl["config"], channels=sl["channels"], meta=sl["meta"])
 
     def _scanlist_scan_done(self, result: dict) -> bool:
         """Record the finished scan; True when the next scan should start."""
@@ -1351,6 +1357,7 @@ class MainWindow(QMainWindow):
         sl, self._sl = self._sl, None
         if sl is None:
             return
+        self._update_scanlist_info(preview=False)      # settings edited during the list; keep its results
         if not sl["results"]:
             self._log("warning", f"Scanlist '{sl['name']}' ended without a completed scan; no list written.")
             return
@@ -1378,12 +1385,15 @@ class MainWindow(QMainWindow):
             self.abort_btn.setEnabled(False)
 
     def _set_running_ui(self, running: bool) -> None:
+        """A run locks only what it depends on: Start, the setup, the account, the measured
+        channels, the stage when it moves it, the choice of measurement and -- during a scanlist --
+        the scanlist settings.  The rest stays usable to prepare the next measurement; the run
+        keeps the values it started with (a scanlist also its metadata and configuration name)."""
         self.start_btn.setEnabled(not running)
         self.pause_btn.setEnabled(running)
         self.abort_btn.setEnabled(running)
         self.trajectory.set_editable(not running)
-        self.scanlist.set_editable(not running)
-        self.config_list.setEnabled(not running)
+        self.scanlist.set_editable(not (running and self._sl is not None))
         for b in self.setup_btns.values():
             b.setEnabled(not running)
         self.login_btn.setEnabled(not running)
@@ -1521,7 +1531,12 @@ class MainWindow(QMainWindow):
                                      "calibration, then Save and Activate.")
             self.bottom_tabs.setCurrentWidget(self.bd_panel)
 
-    def _update_scanlist_info(self) -> None:
+    def _update_scanlist_info(self, preview: bool = True) -> None:
+        """The Scanlist tab's plan from the current settings.  While a scanlist runs the tab shows
+        that list (edits meanwhile are for the next measurement); *preview* False keeps the table,
+        e.g. the finished list's results."""
+        if self._sl is not None:
+            return
         wf = self.trajectory.workflow()
         n, secs, msg = self.trajectory.estimate()
         cfg = self.config_list.current_name() or ""
@@ -1540,7 +1555,7 @@ class MainWindow(QMainWindow):
                      "(set it in the Hardware box).</span>")
         self.scanlist.set_measurement(f"{wf.title}" + (f"  ·  {cfg}" if cfg else ""),
                                       flip_allowed="b" in {p.name for p in wf.params}, plan_html=plan)
-        if self._sl is None:
+        if preview:
             self.scanlist.preview(float(p["b"]) if "b" in p else None)
         self.scanlist.set_auto_name(self.trajectory.meta.build_scan_name(
             volt=float(p.get("volt", 0.0)), freq_Hz=float(p.get("lockin_freq", 0.0)), config_name=cfg or wf.short))
@@ -1561,8 +1576,8 @@ class MainWindow(QMainWindow):
         self._map_data = {}
         self._map_axes = None
         if key == "xy_sweep":
-            xs = plans.axis_values(params["x_min"], params["x_max"], params["x_step"])
-            ys = plans.axis_values(params["y_min"], params["y_max"], params["y_step"])
+            xs, ys = plans.xy_axes(params["x_min"], params["x_max"], params["x_step"],
+                                   params["y_min"], params["y_max"], params["y_step"])
             self._map_axes = (xs, ys)
             for c in chans:
                 self._map_data[c["id"]] = np.full((len(ys), len(xs)), np.nan)

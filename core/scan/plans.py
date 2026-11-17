@@ -126,17 +126,25 @@ def y_sweep_points(y_min, y_max, y_step, x, b, repeat_num) -> tuple[list[Positio
     return pts, ys
 
 
+def xy_axes(x_min, x_max, x_step, y_min, y_max, y_step) -> tuple[np.ndarray, np.ndarray]:
+    """The XY map's grid: X from "From x" to "To x", Y always ascending (negative to positive,
+    whichever way "From y" / "To y" are entered).  The live map and the engine use this one
+    definition, so a point's (ix, iy) is the same cell in both."""
+    return axis_values(x_min, x_max, x_step), np.sort(axis_values(y_min, y_max, y_step))
+
+
 def xy_points(x_min, x_max, x_step, y_min, y_max, y_step, b, repeat_num):
-    """Serpentine in y per column, whole map repeated (MiniMoke XY_Sweep)."""
-    xs = axis_values(x_min, x_max, x_step)
-    ys = axis_values(y_min, y_max, y_step)
+    """Column by column with Y as the fast axis: every column is measured from the most negative
+    to the most positive Y -- the same direction in every column, no zigzag -- then the stage
+    flies back and X steps to the next column; the whole map repeated.  (MiniMoke's XY_Sweep ran
+    Y serpentine; ``loop`` counts columns and ``iteration`` is the Y index.)"""
+    xs, ys = xy_axes(x_min, x_max, x_step, y_min, y_max, y_step)
     pts = []
     loop = 0
     for rep in range(max(int(repeat_num), 1)):
         for i, xv in enumerate(xs):
-            order = range(len(ys)) if i % 2 == 0 else range(len(ys) - 1, -1, -1)
-            for j in order:
-                pts.append(PositionPoint(float(xv), float(ys[j]), float(b), i, loop, i, j, rep))
+            for j, yv in enumerate(ys):
+                pts.append(PositionPoint(float(xv), float(yv), float(b), j, loop, i, j, rep))
             loop += 1
     return pts, xs, ys
 

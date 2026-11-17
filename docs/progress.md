@@ -208,6 +208,23 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   window garbage-collected mid-session made a later test crash now and then;
   its timers stop on close.  Simulation and fake drivers only.
 
+* 2026-11-17 — **XY map without zigzag, fewer greyed controls during a run**
+  (branch `feature/xy-raster-live-ui`, from `main` at `b4fae7b`).  An XY map
+  is still measured column by column with Y as the fast axis, but Y now runs
+  from the most negative to the most positive Y in every column (no zigzag,
+  whichever way From / To y are entered; MiniMoke ran Y serpentine), X steps
+  between columns.  The file is laid out as before (`[n_y, n_x]`, Y
+  ascending); `/metadata scan_order` records the order.  During a run Samba_mini now
+  greys only what the run depends on: Start, setup, account, the measured
+  channels, the stage when the run moves it, the choice of measurement
+  (Spatial / Field, scanned axes, lock-in or DC sweep) and, during a scanlist,
+  the scanlist settings.  Positions, field, timing, metadata, the Hardware
+  values, the field monitor and the configuration list stay usable to prepare
+  the next measurement (a note says so); loading a configuration waits until
+  the run has ended.  A scanlist keeps the metadata and configuration name it
+  started with (previously re-read from the fields before each scan).
+  Simulation only.
+
 ## Tests
 
 `scripts\run_tests.bat` → **154 passed** (≈200 s, 2026-11-17) on the
