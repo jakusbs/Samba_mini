@@ -33,7 +33,10 @@ STAGE_TITLES = {"longitudinal": "Longitudinal stage · Thorlabs Kinesis",
 class ScanPlot(QWidget):
     """The Calibration tab's plot: the channels of the calibration time scan
     (Y1 left, Y2 right) against the time since it started.  It only shows
-    data from a scan started with Start while this tab is open."""
+    data from a scan started with Start while this tab is open.  The Y1 / Y2
+    choice is remembered per account and setup (Samba_mini's working state)."""
+    selection_changed = pyqtSignal()
+    DEFAULT_SELECTION = {"y1": "dc_signal", "y2": "intensity"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,6 +57,7 @@ class ScanPlot(QWidget):
             combo.setSizeAdjustPolicy(NoScrollComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
             combo.currentIndexChanged.connect(lambda _i: self._redraw(force=True))
+            combo.currentIndexChanged.connect(lambda _i: self.selection_changed.emit())
         for w, label, color in ((self.y1, "Y1:", "#89b4fa"), (self.y2, "Y2:", "#f38ba8")):
             lbl = QLabel(label)
             lbl.setStyleSheet(f"color:{color};")
@@ -104,6 +108,23 @@ class ScanPlot(QWidget):
             combo.setCurrentIndex(max(combo.findData(cur), 0))
             combo.blockSignals(False)
         self.units = {ch.name: (names.get(ch.name, {}).get("name", ch.label), ch.unit) for ch in SENSORS}
+        self._redraw(force=True)
+
+    def selection(self) -> dict:
+        """The channel ids shown on Y1 and Y2 ("" = none)."""
+        return {"y1": self.y1.currentData() or "", "y2": self.y2.currentData() or ""}
+
+    def set_selection(self, sel: dict | None) -> None:
+        """Show a remembered choice; anything missing or unknown gets the default (BD / Intensity)."""
+        sel = sel if isinstance(sel, dict) else {}
+        for key, combo in (("y1", self.y1), ("y2", self.y2)):
+            want = sel.get(key, self.DEFAULT_SELECTION[key])
+            i = combo.findData(want if isinstance(want, str) else None)
+            if i < 0:
+                i = max(combo.findData(self.DEFAULT_SELECTION[key]), 0)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(i)
+            combo.blockSignals(False)
         self._redraw(force=True)
 
     def begin(self, duration_s: float, title: str = "") -> None:
@@ -555,6 +576,7 @@ class CalibrationPanel(QWidget):
         """Login, logout or session expiry: nothing shown belongs to the new session yet."""
         self.update_setup()
         self.timescan.reset()
+        self.plot.set_selection(None)
         self.plot.begin(0.0, "Press Start while this tab is open to run a calibration time scan")
 
     def _client(self):
