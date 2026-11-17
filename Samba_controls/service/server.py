@@ -38,7 +38,8 @@ from Samba_controls.service.worker import CancelToken
 log = logging.getLogger(__name__)
 
 #: Capabilities announced in ``server.hello`` (see core.client.ServiceClient.has_feature).
-SERVICE_FEATURES = ("calibration-records-1", "presets-atomic-1", "device-config-1", "startup-lights-1")
+SERVICE_FEATURES = ("calibration-records-1", "presets-atomic-1", "device-config-1", "startup-lights-1",
+                    "channels-1")
 
 
 class ServiceServer:
@@ -384,6 +385,7 @@ class ServiceServer:
             s.user_id, _str(p, "setup"), p.get("id") or None, p.get("sample_id")))
         m["config.get"] = ("auth", self._config_get)
         m["config.save_devices"] = ("admin", self._config_save_devices)
+        m["channels.list"] = ("auth", self._channels_list)
         m["server.devices"] = ("public", self._devices_brief)
 
     # ================================================================ handlers
@@ -732,6 +734,13 @@ class ServiceServer:
         log.info("device configuration saved by %s (%s); applies after a service restart",
                  s.user["username"], ", ".join(sorted(devices)))
         return {"path": str(saved), "file_hash": machine.file_hash(saved), "restart_required": True}
+
+    def _channels_list(self, s, p, r) -> list[dict]:
+        """Every channel (sensors and outputs) with the name, physical line and device name the
+        running service uses -- names edited in Samba_controls apply after a restart, like the
+        other device settings."""
+        from core.scan.channels import channel_table
+        return channel_table(self.cfg.data)
 
     def _devices_brief(self, s, p, r) -> dict:
         """Public: names, display names, start order and states of the devices, and the start-up

@@ -56,6 +56,7 @@ class DatasetSpec:
     group: str = "data"
     dtype: str = "f8"
     shape: tuple | None = None         # defaults to the writer's main shape
+    attrs: dict | None = None          # extra dataset attributes (e.g. channel id, device, line)
 
 
 def _attr(value: Any) -> Any:
@@ -114,6 +115,8 @@ class ScanWriter:
                 ds.attrs["role"] = spec.role
                 ds.attrs["label"] = spec.label
                 ds.attrs["unit"] = spec.unit
+                for k, v in (spec.attrs or {}).items():
+                    ds.attrs[k] = _attr(v)
             f.flush()
         except Exception as exc:
             self._close_quietly()

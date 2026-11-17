@@ -194,6 +194,8 @@ def test_trajectory_layout_round_trips_every_minimoke_workflow(qapp):
             if name == "repeat_num":          # no Repeats field: repeats are done with the Scanlist
                 assert got[name] == 1
                 continue
+            if name == "record_hall":         # set from the ticked Hall channel (sensor rows), no box
+                continue
             assert got[name] == pytest.approx(v), (key, name, got[name], v)
     # each measurement keeps its own lock-in / timing values (MiniMoke remembered them per procedure)
     t.set_workflow("b_sweep_lockin")
@@ -221,16 +223,23 @@ def test_trajectory_layout_round_trips_every_minimoke_workflow(qapp):
     assert t.metadata()["incidence"] == "PMOKE" and not t.meta.incidence_combo.isEnabled()
 
 
-def test_right_panel_rows_plot_only(qapp):
+def test_right_panel_rows_measure_and_plot(qapp):
+    """Samba's sensor rows: the tick = measured and saved, the dropdown = Y1 / Y2 / hidden."""
     from Samba_mini.panels.right_panel import RightPanel
 
     r = RightPanel()
     r.configure_for("b_sweep_lockin")
     axes = {m["name"]: m["axis"] for m in r.sensors_meta()}
     assert axes["lockin_x"] == "Y1" and axes["dc_signal"] == "Y2" and axes["hall_field"] == "—"
+    assert {c["id"] for c in r.selected()} >= {"lockin_x", "dc_signal", "hall_field"}   # all measured
     r.configure_for("b_sweep_dc")                       # no lock-in channels without the lock-in
-    assert all(m["axis"] == "—" for m in r.sensors_meta() if m["name"].startswith("lockin"))
     assert {row.channel() for row in r.rows} == {"dc_signal", "intensity", "hall_field"}
+    hall = next(row for row in r.rows if row.channel() == "hall_field")
+    hall.cb.setChecked(False)                           # not ticked: not measured at all
+    assert {c["id"] for c in r.selected()} == {"dc_signal", "intensity"}
+    r.configure_for("time")
+    r.configure_for("b_sweep_dc")                       # each measurement keeps its own rows
+    assert {c["id"] for c in r.selected()} == {"dc_signal", "intensity"}
 
 
 def test_scanlist_runs_n_scans_with_field_flip(qapp, service, tmp_path):
@@ -384,7 +393,8 @@ def test_data_browser_opens_a_running_xy_map_without_crashing(qapp, service, tmp
     w.browser.refresh()
     path = w.engine.result["path"]
     sf = w.browser._get_scanfile(path)
-    res = sf.read_2d("dc_signal")
+    assert "BD" in sf.sensor_keys                       # saved under the channel's name, as in Samba
+    res = sf.read_2d("BD")
     assert np.allclose(res["x_arr"], [-20, -10, 0, 10, 20]) and np.allclose(res["y_arr"], [0, 10, 20, 30])
     w.browser.plot.plot_2d(res["data"], res["x_arr"], res["y_arr"], "X", "Y", "DC")
     w.close()

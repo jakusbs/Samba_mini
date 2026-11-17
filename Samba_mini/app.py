@@ -39,7 +39,7 @@ from core.kerr import KerrDisplayState
 from core.polarity import flip_phase, phase_label
 from core.protocol import ErrorCode, ServiceError
 from core.scan import plans
-from core.scan.channels import SENSORS, sensors_for
+from core.scan.channels import AVERAGED
 from core.scan.engine import RunRequest, ScanEngine
 from core.scan.workflows import WORKFLOWS
 from core.theme import app_style
@@ -60,7 +60,7 @@ RUN_META_KEYS = ("device_id", "incidence", "mirror_shift", "polarization", "lam2
 
 log = logging.getLogger("Samba_mini")
 
-MEAN_KEYS = ["dc_signal", "intensity", "hall_field", "lockin_x", "lockin_r"]
+MEAN_KEYS = list(AVERAGED)          # channels whose mean over a B-sweep's sweeps is shown and saved
 SETUP_LABEL = {"longitudinal": "Longitudinal", "polar": "Polar"}
 SETUP_COLOR = {"longitudinal": "#00a86b", "polar": "#ab4b52"}       # Samba's Green / IR colours
 REPO = Path(__file__).resolve().parents[1]
@@ -84,6 +84,8 @@ class MainWindow(QMainWindow):
         self._stash: dict | None = None                        # unsaved state of an expired session
         self._session_lost_pending = False
         self._run_cal: dict | None = None                      # calibration frozen for the current run
+        self._run_channels: list[dict] = []                     # channels the current run records
+        self.channel_table: list[dict] = []
         self._ws_timer = QTimer(self)                          # working-state autosave (debounced)
         self._ws_timer.setSingleShot(True)
         self._ws_timer.setInterval(300)
@@ -332,6 +334,7 @@ class MainWindow(QMainWindow):
         self.scanlist.changed.connect(self._update_scanlist_info)
         self.config_list.config_selected.connect(lambda *_a: self._update_scanlist_info())
         self.right.plot_changed.connect(self._apply_plot_config)
+        self.right.plot_changed.connect(self._working_changed)     # rows are part of the working state
         self.right.map_sensor_changed.connect(self._switch_map_sensor)
         self.right.colormap_changed.connect(self.map2d.set_colormap)
         self.config_list.config_selected.connect(self._load_config)
@@ -574,6 +577,7 @@ class MainWindow(QMainWindow):
             self.plot1d.clear()
             self.map2d.clear()
             self._map_data, self._map_axes = {}, None
+            self._load_channels()
             self._enter_setup(setup)
         finally:
             self._restoring = False
@@ -584,6 +588,21 @@ class MainWindow(QMainWindow):
         self._update_control_btn()
         self._update_scanlist_info()
         self._show_estimate()
+
+    def _load_channels(self) -> None:
+        """The channel names the running service uses (Samba_controls -> Channels); defaults while
+        logged out or with an older service."""
+        from Samba_mini.panels.right_panel import default_table
+        c = self._client()
+        table = None
+        if c.session and c.has_feature("channels-1"):
+            try:
+                table = [r for r in c.call("channels.list", {}, 10.0) if r.get("kind") == "sensor"]
+            except ServiceError as exc:
+                self._log("warning", f"channel names not loaded: {error_text(exc)}")
+        self.channel_table = table or default_table()
+        self.right.set_channels(self.channel_table)
+        self.calibration.plot.set_channels(self.channel_table)
 
     def _enter_setup(self, setup: str) -> None:
         """Show *setup* with this account's working state for it (or defaults).  No prompts."""
@@ -607,6 +626,7 @@ class MainWindow(QMainWindow):
         meta.reset(operator=self._default_operator() if ws.get("experiment") is None else "")
         meta.load_values(ws.get("experiment") or {})
         meta.load_values(ws.get("optics") or {})
+        self.right.load_all(ws.get("sensors"))                   # each measurement's channel rows
         self.calibration.timescan.reset()
         self.calibration.timescan.load(ws.get("calib_scan") or {})
         name = ws.get("preset")
@@ -624,7 +644,8 @@ class MainWindow(QMainWindow):
         exp, optics = split_metadata(self.trajectory.meta.get_values())
         return {"v": WORKING_VERSION, "trajectory": self.trajectory.working_state(), "experiment": exp,
                 "optics": optics, "calib_scan": self.calibration.timescan.values(),
-                "preset": self._preset_name[self.setup], "preset_clean": self._preset_clean[self.setup]}
+                "preset": self._preset_name[self.setup], "preset_clean": self._preset_clean[self.setup],
+                "sensors": self.right.all_states()}
 
     def _working_changed(self, *_a) -> None:
         if self._restoring:
@@ -789,7 +810,7 @@ class MainWindow(QMainWindow):
         sample identity or the operator (those belong to the experiment)."""
         _exp, optics = split_metadata(self.trajectory.meta.get_values())
         return {"schema": PRESET_SCHEMA, "workflow": self.trajectory.current, "params": self.trajectory.params(),
-                "metadata": optics}
+                "metadata": optics, "sensors": self.right.state_for(self.trajectory.current)}
 
     _config_value = _preset_value              # earlier name
 
@@ -855,6 +876,8 @@ class MainWindow(QMainWindow):
             wf = v.get("workflow", self.trajectory.current)
             self.trajectory.set_workflow(wf)
             self.trajectory.set_params(wf, v.get("params", {}))
+            if isinstance(v.get("sensors"), list):             # configurations saved with channel rows
+                self.right.load_state(wf, v["sensors"])
             meta = dict(v.get("metadata", {}))
             meta.pop("export_csv", None)
             if v.get("geometry") and "incidence" not in meta:      # configurations saved before the Samba layout
@@ -1014,6 +1037,10 @@ class MainWindow(QMainWindow):
         if msg:
             QMessageBox.warning(self, "Cannot start", msg)
             return None
+        if not self.right.selected():
+            QMessageBox.warning(self, "Nothing to measure", "Tick at least one channel in the sensor rows "
+                                "(right) to measure and save.")
+            return None
         return wf, params, n
 
     def _confirm_real(self, wf, params: dict, what: str) -> bool:
@@ -1085,8 +1112,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _launch(self, wf, params: dict, n: int, extra_meta: dict | None = None, label: str = "",
-                config_name: str | None = None) -> None:
+                config_name: str | None = None, channels: list | None = None) -> None:
         meta = self.trajectory.metadata()
+        chans = list(channels) if channels is not None else self.right.selected()
+        self._run_channels = chans
+        params = dict(params)
+        if "record_hall" in params:                    # the file's parameters say what was read
+            params["record_hall"] = any(c.get("device") == "hall" for c in chans)
         data_dir = self._data_dir()
         notebook = self.store.get("lab_notebook") or os.path.join(data_dir, "lab_notebook_SambaMini.csv")
         em = {k: meta[k] for k in RUN_META_KEYS if k in meta}
@@ -1098,7 +1130,7 @@ class MainWindow(QMainWindow):
                                       else self.config_list.current_name() or ""), save_dir=data_dir,
                          export_csv=bool(self.store.get("export_csv", False)), lab_notebook=notebook,
                          extra_metadata=em, bd_calibration=list(snap["values"]) if snap else None,
-                         bd_calibration_record=dict(snap) if snap else None)
+                         bd_calibration_record=dict(snap) if snap else None, channels=chans)
         self._push_kerr_calibration(snap["values"] if snap else [0.0] * 6)   # display = file
         self.bd_panel.set_running(True, snap)
         self._prepare_plots(wf.key, params, n)
@@ -1165,8 +1197,13 @@ class MainWindow(QMainWindow):
         self._set_running_ui(True)
         self.calibration.begin_scan(params["duration"], f"Calibration time scan: {n} samples, "
                                     f"{params['interval']:g} s apart, Int {params['acq_time']:g} s")
+        chans = self.right.selected_for("time")         # the time scan's rows, whatever is shown
+        if not any(c["id"] == "dc_signal" for c in chans):
+            bd = self.right.info("dc_signal")
+            chans.insert(0, {"id": "dc_signal", "name": bd["name"], "unit": bd["unit"], "device": "daq",
+                             "line": bd.get("line", ""), "y_axis": "hidden"})
         self._launch(wf, params, n, {"calibration_scan": True}, " — calibration time scan",
-                     config_name="calibration")
+                     config_name="calibration", channels=chans)
 
     # ---------------------------------------------------------------- scanlist
     def start_scanlist(self) -> None:
@@ -1185,6 +1222,7 @@ class MainWindow(QMainWindow):
         if not self._freeze_calibration():          # one calibration snapshot for the whole scanlist
             return
         self._sl = {"wf": wf, "params": params, "n": n, "i": 0, "total": sv["n_scans"], "flip": sv["field_flip"],
+                    "channels": self.right.selected(),             # the same channels for every scan
                     "order": sv["order"], "name": sv["name"], "results": [], "stop": False,
                     "dir": os.path.join(self._data_dir(), f"ScanLists_{SETUP_LABEL[self.setup]}")}
         self._run_t0 = time.time()
@@ -1212,7 +1250,8 @@ class MainWindow(QMainWindow):
         if sl["flip"]:
             label += f", field {phase_label(phase)} (coil {params['b']:+.4g} V)"
         self._launch(sl["wf"], params, sl["n"], {"scanlist_name": sl["name"], "scanlist_index": i + 1,
-                                                 "scanlist_phase": phase_label(phase)}, label)
+                                                 "scanlist_phase": phase_label(phase)}, label,
+                     channels=sl["channels"])
 
     def _scanlist_scan_done(self, result: dict) -> bool:
         """Record the finished scan; True when the next scan should start."""
@@ -1270,6 +1309,7 @@ class MainWindow(QMainWindow):
             b.setEnabled(not running)
         self.login_btn.setEnabled(not running)
         self.calibration.set_stage_enabled(not running)
+        self.right.set_running(running)
         if not running:
             self.pause_btn.setText(" Pause")
 
@@ -1428,13 +1468,12 @@ class MainWindow(QMainWindow):
 
     # ================================================================ plots
     def _prepare_plots(self, key: str, params: dict, n: int) -> None:
-        wf = WORKFLOWS[key]
-        chans = sensors_for(wf.uses_lockin)
-        all_sensors = [{"label": ch.label, "unit": ch.unit} for ch in chans]
+        chans = self._run_channels or []
+        all_sensors = [{"label": c["name"], "unit": c["unit"]} for c in chans]
         extra = 0
         if key in ("b_sweep_dc", "b_sweep_lockin"):
-            all_sensors += [{"label": f"{ch.label} (mean)", "unit": ch.unit} for ch in chans
-                            if ch.name in MEAN_KEYS]
+            all_sensors += [{"label": f"{c['name']} (mean)", "unit": c["unit"]} for c in chans
+                            if c["id"] in MEAN_KEYS]
         xl, xu = {"b_sweep_dc": ("Coil command", "V"), "b_sweep_lockin": ("Coil command", "V"),
                   "x_sweep": ("X position", "um"), "y_sweep": ("Y position", "um"),
                   "xy_sweep": ("X position", "um"), "time": ("Time", "s")}[key]
@@ -1446,11 +1485,11 @@ class MainWindow(QMainWindow):
             xs = plans.axis_values(params["x_min"], params["x_max"], params["x_step"])
             ys = plans.axis_values(params["y_min"], params["y_max"], params["y_step"])
             self._map_axes = (xs, ys)
-            for ch in chans:
-                self._map_data[ch.name] = np.full((len(ys), len(xs)), np.nan)
+            for c in chans:
+                self._map_data[c["id"]] = np.full((len(ys), len(xs)), np.nan)
             name = self.right.map_combo.currentData() or "dc_signal"
-            ch = next((c for c in chans if c.name == name), chans[0])
-            self.map2d.setup(xs, ys, "X (um)", "Y (um)", f"{ch.label} ({ch.unit})", self.right.cmap.currentText())
+            c = next((c for c in chans if c["id"] == name), chans[0])
+            self.map2d.setup(xs, ys, "X (um)", "Y (um)", f"{c['name']} ({c['unit']})", self.right.cmap.currentText())
         else:
             self.map2d.clear()
 
@@ -1467,23 +1506,22 @@ class MainWindow(QMainWindow):
 
     def _switch_map_sensor(self, name: str) -> None:
         if name in self._map_data:
-            ch = next(c for c in SENSORS if c.name == name)
-            self.map2d.switch_sensor(self._map_data[name], f"{ch.label} ({ch.unit})")
+            c = next((c for c in self._run_channels or [] if c["id"] == name), self.right.info(name))
+            self.map2d.switch_sensor(self._map_data[name], f"{c['name']} ({c['unit']})")
 
     def _on_point(self, ev: dict) -> None:
         kind = ev.get("kind")
         vals = ev.get("values", {})
         if kind == "average":
             xs = ev["x"]
-            for k in MEAN_KEYS:
-                ch = next((c for c in SENSORS if c.name == k), None)
-                ys = ev["values"].get(k)
-                if ch is None or ys is None:
+            for c in self._run_channels or []:
+                ys = ev["values"].get(c["id"])
+                if c["id"] not in MEAN_KEYS or ys is None:
                     continue
                 for i, (x, y) in enumerate(zip(xs, ys)):
-                    self.plot1d.update_point(i, x, {f"{ch.label} (mean)": y})
+                    self.plot1d.update_point(i, x, {f"{c['name']} (mean)": y})
             return
-        labelled = {ch.label: vals.get(ch.name, math.nan) for ch in SENSORS}
+        labelled = {c["name"]: vals.get(c["id"], math.nan) for c in self._run_channels or []}
         labelled[X_TIME] = vals.get("time", math.nan)
         wf = ev.get("workflow")
         if wf in ("b_sweep_dc", "b_sweep_lockin"):
@@ -1497,7 +1535,7 @@ class MainWindow(QMainWindow):
         if wf == "xy_sweep" and self._map_axes is not None and ev.get("rep", 0) == 0:
             for name, arr in self._map_data.items():
                 arr[ev["iy"], ev["ix"]] = vals.get(name, math.nan)
-            shown = self.right.map_combo.currentData() or "dc_signal"
+            shown = self.right.map_combo.currentData() or next(iter(self._map_data), "")
             self.map2d.update_point(ev["ix"], ev["iy"], vals.get(shown, math.nan))
         rec = ev.get("record", {})
         if self._calib_run:

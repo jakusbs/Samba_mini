@@ -148,13 +148,22 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   start-up lights — the instruments now connect one after another in
   `start_order` (Astor-like) instead of in parallel.  Simulation only.
 
+* 2026-11-17 — **Channels, Samba-style sensor selection, no std** (branch
+  `feature/channel-registry`, from `main` at `ef0c4f3`).  Samba_controls'
+  *Channels* tab names every channel (BD, intensity/focus line, magnet coil
+  command, AO1/2, lock-in X/Y/R/θ, Hall field) and wires the DAQ ones; Samba_mini's
+  sensor rows use those names, the tick = measured and saved, the dropdown =
+  Y1 / Y2 / hidden; unticked instruments are not read; files save channels under
+  their names with the id as an attribute (as Samba); the std values are gone;
+  the "Record Hall" box is replaced by ticking the Hall channel.  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **130 passed** (≈140 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **136 passed** (≈150 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
 engine 13, drivers 14, core 16, recovery 4, process 2, GUI 16, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 15,
-device settings and lights 6, user folders 2.
+device settings and lights 6, user folders 2, channels 6.
 See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
@@ -264,6 +273,11 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
     instrument (7270 over Ethernet) answers `device.info`.
 
 ## Known limitations
+
+* Channel units are the instruments' own (V, mT, deg) and cannot be renamed;
+  new DAQ inputs (e.g. a third photodiode on ai2) need code (DAQ driver,
+  simulation, channel list).
+* With the Hall channel unticked, a scanlist's `field_T` column is NaN.
 
 * Instruments now connect one after another at service start, so the start
   takes a few seconds longer than before (all connected in parallel), and an

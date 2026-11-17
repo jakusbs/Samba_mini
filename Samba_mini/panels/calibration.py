@@ -90,6 +90,22 @@ class ScanPlot(QWidget):
         self._timer.timeout.connect(self._redraw)
         self._timer.start()
 
+    def set_channels(self, table: list[dict]) -> None:
+        """Show the channel names of the running service in the Y1/Y2 lists."""
+        names = {r["id"]: r for r in table}
+        for combo in (self.y1, self.y2):
+            cur = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("—", "")
+            for ch in SENSORS:
+                r = names.get(ch.name, {})
+                combo.addItem(f"{r.get('name', ch.label)} ({ch.unit})", ch.name)
+            combo.setCurrentIndex(max(combo.findData(cur), 0))
+            combo.blockSignals(False)
+        self.units = {ch.name: (names.get(ch.name, {}).get("name", ch.label), ch.unit) for ch in SENSORS}
+        self._redraw(force=True)
+
     def begin(self, duration_s: float, title: str = "") -> None:
         for d in self.data.values():
             d.clear()

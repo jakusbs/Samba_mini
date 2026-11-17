@@ -16,7 +16,9 @@ import numpy as np
 
 from core.storage.hdf5_writer import read_file
 
-# (CSV column, dataset name candidates)
+# (CSV column, dataset name candidates; "@<id>" = the dataset of that channel, found by its
+# ``channel`` attribute -- files save channels under their names, as in Samba -- or by the id
+# itself in files written before channels had names)
 COLUMNS = [
     ("Time (s)", ["time"]),
     ("Iteration", ["iteration", "index"]),
@@ -25,26 +27,31 @@ COLUMNS = [
     ("X Position (um)", ["actuator_x", "position_x"]),
     ("Y Position (um)", ["actuator_y", "position_y"]),
     ("Coil command (V) [MiniMoke: Magnetic Field (A)]", ["actuator_coil", "coil_setpoint"]),
-    ("Hall field (mT)", ["hall_field"]),
-    ("Voltage X 1f (V)", ["lockin_x"]),
-    ("Voltage Y 1f (V)", ["lockin_y"]),
-    ("Voltage R 1f (V)", ["lockin_r"]),
-    ("Phase 1f (deg)", ["lockin_theta"]),
-    ("Voltage DC (V)", ["dc_signal"]),
-    ("Voltage DC STD (V)", ["dc_std"]),
-    ("Intensity (V)", ["intensity"]),
-    ("Intensity STD (V)", ["intensity_std"]),
+    ("Hall field (mT)", ["@hall_field"]),
+    ("Voltage X 1f (V)", ["@lockin_x"]),
+    ("Voltage Y 1f (V)", ["@lockin_y"]),
+    ("Voltage R 1f (V)", ["@lockin_r"]),
+    ("Phase 1f (deg)", ["@lockin_theta"]),
+    ("Voltage DC (V)", ["@dc_signal"]),
+    ("Intensity (V)", ["@intensity"]),
     ("Acquisition id", ["acq_id"]),
     ("Trigger time (Unix s)", ["t_trigger"]),
 ]
+
+
+def _channel_key(data: dict, cid: str) -> str | None:
+    for key, d in data.items():
+        if str(d.get("attrs", {}).get("channel", "")) == cid:
+            return key
+    return cid if cid in data else None
 
 
 def _table(data: dict, prefix: str) -> tuple[list[str], list[np.ndarray]]:
     names, cols = [], []
     for col, candidates in COLUMNS:
         for c in candidates:
-            key = f"{prefix}{c}"
-            if key in data:
+            key = _channel_key(data, c[1:]) if c.startswith("@") else f"{prefix}{c}"
+            if key is not None and key in data:
                 names.append(col)
                 cols.append(np.asarray(data[key]["values"], dtype=float).ravel())
                 break

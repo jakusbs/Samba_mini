@@ -197,9 +197,7 @@ class DaqBase(Device):
             "acq_time_s": pending["acq_time_s"],
             "n_samples": int(bd.size),
             "balanced_V": float(np.mean(bd)),
-            "balanced_std_V": float(np.std(bd)),
             "intensity_V": float(np.mean(it)),
-            "intensity_std_V": float(np.std(it)),
         }
         self.store("balanced_V", self.make_reading("balanced_V", result["balanced_V"], "acquisition", t_end))
         self.store("intensity_V", self.make_reading("intensity_V", result["intensity_V"], "acquisition", t_end))

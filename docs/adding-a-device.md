@@ -25,6 +25,22 @@ A new instrument **type** still needs a driver (section 2); to make its settings
 editable in the form, add its section name to `DEVICE_SECTIONS` in
 `core/config/machine.py` and give it a `label` and `start_order`.
 
+### Channels tab
+
+Every quantity an instrument measures or sets is a **channel**: the DAQ's
+balanced-diode input (default name "BD", `Dev1/ai0`), intensity / focus-line
+input ("Intensity", `Dev1/ai1`), the magnet coil command ("Magnet", `Dev1/ao3`,
+read/write) and AO1/AO2; the lock-in's X, Y, R, θ; the Hall field.  The
+*Channels* tab (administrators) names them and, for the DAQ, chooses the
+physical line.  Read channels are what Samba_mini measures: its sensor rows
+list them by these names; the tick = measured and saved, Y1 / Y2 / hidden =
+plot.  Files save each channel under its name, like Samba (`/data/<name>`,
+spaces → `_`), with the fixed id (`dc_signal`, `intensity`, `lockin_x` …) as the
+`channel` attribute, so the BD fit, θ conversion and Data Browser find them
+after a rename.  Names must differ and may not be names the files use
+themselves (`time`, `actuator_*`, …).  Units are the instrument's (V, mT, deg)
+and are not editable.  Names apply after a service restart.
+
 ## 1. The pieces
 
 ```
