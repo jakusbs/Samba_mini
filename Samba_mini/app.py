@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from PyQt6 import sip
 from PyQt6.QtCore import QEventLoop, QSettings, Qt, QTimer
 from PyQt6.QtGui import QAction, QColor, QIcon, QKeySequence, QTextCharFormat
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
@@ -31,7 +32,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog,
 
 from core import paths
 from core.data_browser import DataBrowserPanel
-from core.gui.bridge import EngineBridge, ServiceBridge, error_text
+from core.gui.bridge import EngineBridge, ServiceBridge, call_async, error_text
 from core.gui.login import LoginDialog
 from core.gui.outputs import ask_keep_outputs
 from core.plot_config import X_NATURAL, X_TIME
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._wire()
         self._restore_geometry()
+        self._probing = False                                   # a service probe is on its way
         self._poll = QTimer(self)
         self._poll.setInterval(2000)
         self._poll.timeout.connect(self._check_service)
@@ -476,11 +478,28 @@ class MainWindow(QMainWindow):
 
     # ================================================================ service / login
     def _check_service(self) -> None:
+        """Every 2 s: is the device service there?  The probe runs off the GUI thread -- without a
+        service each probe waits ~1.5 s for an answer, and done on the GUI thread that froze the
+        window most of the time while Samba_controls was not started (17 Nov)."""
         c = self._client()
         if c.connected and c.instance_id:
             self._set_mode_badge((self.bridge.hello_info or {}).get("mode"))
             return
-        info = self.bridge.probe(1.0)
+        if self._probing:
+            return
+        self._probing = True
+
+        def failed(_exc):
+            if not sip.isdeleted(self):
+                self._probing = False
+                self._set_mode_badge(None)
+        call_async(lambda: self.bridge.probe(1.0), self._service_probed, failed)
+
+    def _service_probed(self, info: dict | None) -> None:
+        if sip.isdeleted(self):                  # the window closed while the probe was on its way
+            return
+        self._probing = False
+        c = self._client()
         if info is None:
             self._set_mode_badge(None)
             return

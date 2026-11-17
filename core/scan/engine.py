@@ -239,8 +239,8 @@ class ScanEngine:
 
     # ================================================================ helpers
     def _set_state(self, state: str, message: str = "") -> None:
+        self.message = message                  # first: whoever sees the new state sees its message
         self.state = state
-        self.message = message
         try:
             self.cb.state(state, message)
         except Exception:  # noqa: BLE001
@@ -819,7 +819,10 @@ class ScanEngine:
                 if st == "PAUSED" and self.state != PAUSED:
                     self._set_state(PAUSED, res.get("message") or "Paused")
                     self._pause.set()
-                elif st == "RUNNING" and self.state == PAUSED:
+                elif st == "RUNNING" and self.state == PAUSED and not self._pause.is_set():
+                    # Only once the pause has been lifted (resume): right after the engine paused
+                    # itself (e.g. the disk), the service may still report RUNNING for one poll --
+                    # that is not a resume (it lost the reason and paused again as "Paused").
                     if self._pending_writes:
                         self._flush_pending()
                     if not self._pending_writes:

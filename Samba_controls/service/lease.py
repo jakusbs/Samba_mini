@@ -15,7 +15,9 @@ States::
   cancelled and waited for, then the configured cleanup runs.  Only after the
   operations have stopped is the lease FREE again.  If an operation does not
   stop in time the lease stays RECONCILING (new owners are refused) until an
-  administrator retries reconciliation successfully.
+  administrator forces a release.  A forced release first reconnects faulted
+  devices; once every operation has stopped it frees the setup even if the
+  cleanup of an unreachable device could not be confirmed (that is reported).
 """
 
 from __future__ import annotations

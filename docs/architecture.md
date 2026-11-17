@@ -45,8 +45,11 @@ Magnet-Physik, not redistributed here).
   (`set_outputs_and_reset`) re-time the AO task to 2 samples at 10 kHz.
 * **Ametek 7270** (`ametek7270_class.py`, derived from PyMeasure, MIT):
   NUL-terminated ASCII; every set is followed by a read that must be empty;
-  Ethernet socket framing sends one extra status chunk per response which is
-  detected at connect (`ID` probe) and drained after every transaction;
+  the Ethernet socket follows every response with two raw bytes, the status and
+  the overload byte (the overload byte is 0 = NUL normally, not during an
+  overload).  They are detected at connect (`ID` probe) and read by count after
+  every transaction; an overload is logged.  An unreadable reply re-syncs the
+  stream and is asked once more, then fails without faulting the lock-in;
   reconnect = reopen + VISA clear + re-probe; port 50000 → 50001 fallback;
   one session shared for configuration and measurement; per point `XY.` read.
 * **Hall probe** (`hallsensor_class.py`): pythonnet `clr.AddReference` of a
@@ -232,7 +235,10 @@ the owners' workers).  Logical devices never open hardware themselves.
   Samba_controls).  It is held by one session, renewed by heartbeats, expires
   after `lease_ttl_s` (default 15 s).  On expiry or release with work
   outstanding the backend cancels operations, runs the configured cleanup and
-  only then frees the lease (`LEASE_RECONCILING` until done).  Reads and cached
+  only then frees the lease (`LEASE_RECONCILING` until done).  An
+  administrator's forced release reconnects faulted devices first and, once
+  every operation has stopped, frees the setup even if the cleanup of an
+  unreachable device cannot be confirmed (reported as `unconfirmed`).  Reads and cached
   monitoring do not need the lease; monitoring never polls an instrument that
   an operation is using — it serves the operation's latest values instead.
 * **Devices of a run:** `run.begin(required_devices=...)` declares what a

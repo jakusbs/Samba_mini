@@ -159,48 +159,70 @@ def test_nidaq_missing_driver_is_disabled(monkeypatch):
 
 # --------------------------------------------------------------------------- Ametek 7270
 class Fake7270:
-    """Responds like the 7270; socket framing adds one extra chunk per reply."""
+    """Responds like the 7270, as a byte stream.  Every reply ends in NUL; on the Ethernet socket
+    it is followed by two raw bytes, the status byte and the overload byte.  The overload byte is
+    0 (a NUL) unless the input is overloaded -- then the pair does not end in NUL (17 Nov, rig).
+    A NUL-terminated read that times out leaves the bytes waiting, as on the real link."""
 
     def __init__(self, resource, socket_framing, fail_reads=0, refuse_50000=False):
         if refuse_50000 and "::50000::" in resource:
             raise OSError("connection refused")
         self.resource = resource
         self.extra = 1 if socket_framing else 0
-        self.queue = []
+        self.buffer = bytearray()
         self.timeout = 2000
         self.log = []
         self.fail_reads = fail_reads
+        self.status = 0x21
+        self.overload = 0
         self.state = {"SEN": 0, "TC": 0, "OA.": 0.0, "OF.": 0.0, "REFP.": 0.0, "REFMODE": 1}
+
+    def reply_for(self, cmd):
+        parts = cmd.split()
+        if cmd == "ID":
+            return "7270"
+        if cmd == "VER":
+            return "2.0"
+        if cmd == "XY.":
+            return "1.0E-4,-2.0E-5"
+        if len(parts) == 2 and parts[0] in self.state:
+            self.state[parts[0]] = float(parts[1])
+            return ""
+        if parts[0] in self.state:
+            return str(self.state[parts[0]])
+        return ""
+
+    def status_bytes(self):
+        return bytes([self.status, self.overload]) if self.extra else b""
 
     def write(self, cmd):
         self.log.append(cmd)
-        parts = cmd.split()
-        if cmd == "ID":
-            reply = "7270"
-        elif cmd == "VER":
-            reply = "2.0"
-        elif cmd == "XY.":
-            reply = "1.0E-4,-2.0E-5"
-        elif len(parts) == 2 and parts[0] in self.state:
-            self.state[parts[0]] = float(parts[1])
-            reply = ""
-        elif parts[0] in self.state:
-            reply = str(self.state[parts[0]])
-        else:
-            reply = ""
-        self.queue.append(reply)
-        self.queue.extend(["\n"] * self.extra)
+        self.buffer += self.reply_for(cmd).encode() + b"\x00" + self.status_bytes()
+
+    def _starve(self):
+        """Nothing (complete) to read: the caller waits for the timeout."""
+        raise TimeoutError("timeout")
 
     def read(self):
         if self.fail_reads > 0:
             self.fail_reads -= 1
             raise OSError("VI_ERROR_TMO")
-        if not self.queue:
-            raise TimeoutError("timeout")
-        return self.queue.pop(0)
+        i = self.buffer.find(b"\x00")
+        if i < 0:
+            self._starve()
+        data = bytes(self.buffer[:i])
+        del self.buffer[:i + 1]
+        return data.decode("latin-1")
+
+    def read_bytes(self, count, chunk_size=None, break_on_termchar=False):
+        if len(self.buffer) < count:
+            self._starve()
+        data = bytes(self.buffer[:count])
+        del self.buffer[:count]
+        return data
 
     def clear(self):
-        self.queue.clear()
+        self.buffer.clear()
 
     def close(self):
         pass
@@ -244,7 +266,7 @@ def test_ametek_socket_framing_and_protocol(fake_pyvisa, monkeypatch):
     snap = li.read_xy_rt()
     assert snap["x_V"] == pytest.approx(1e-4) and snap["y_V"] == pytest.approx(-2e-5)
     assert snap["theta_deg"] == pytest.approx(np.degrees(np.arctan2(-2e-5, 1e-4)))
-    assert inst.queue == []                                         # stream stays aligned
+    assert inst.buffer == b""                                       # stream stays aligned
     li.output_off()
     assert inst.log[-1] == "OA. 0"
 
@@ -494,31 +516,29 @@ def test_hall_refuses_dll_with_download_mark(tmp_path, monkeypatch):
 
 
 class FlakyFake7270(Fake7270):
-    """The real 7270 Ethernet link sometimes omits the status chunk after a reply, or sends it late.
-    An empty queue costs the full read timeout, as on the real link."""
+    """The real 7270 Ethernet link sometimes omits the status bytes after a reply, or sends them
+    late.  Waiting for data that is not there costs the full read timeout, as on the real link."""
 
     def __init__(self, *a, drop_every=3, late=False, **k):
         super().__init__(*a, **k)
         self.n = 0
         self.drop_every = drop_every
         self.late = late
-        self.pending = []
+        self.pending = bytearray()
 
-    def write(self, cmd):
-        super().write(cmd)
+    def status_bytes(self):
         self.n += 1
-        if self.extra and cmd != "ID" and self.n % self.drop_every == 0:
-            self.queue.pop()                                  # the status chunk does not come now
+        if self.extra and self.n > 1 and self.n % self.drop_every == 0:   # not for the ID probe
             if self.late:
-                self.pending.append("\n")                     # ... but shortly after
+                self.pending += super().status_bytes()                    # ... they come shortly after
+            return b""                                                    # the status bytes do not come now
+        return super().status_bytes()
 
-    def read(self):
-        if not self.queue:
-            self.queue.extend(self.pending)                   # a late chunk arrives while we wait
-            self.pending.clear()
-            time.sleep(self.timeout / 1000.0)
-            raise TimeoutError("timeout")
-        return self.queue.pop(0)
+    def _starve(self):
+        self.buffer += self.pending                   # late bytes arrive while we wait
+        self.pending.clear()
+        time.sleep(self.timeout / 1000.0)
+        raise TimeoutError("timeout")
 
 
 @pytest.mark.parametrize("late", [False, True])
@@ -540,3 +560,52 @@ def test_ametek_missing_status_chunk_does_not_stall(fake_pyvisa, monkeypatch, la
     elapsed = time.perf_counter() - t0
     assert li.missing_chunks >= 9
     assert elapsed < 30 * 0.15, f"{elapsed:.1f} s for 30 reads"              # was ~2 s per missing chunk
+
+
+def test_ametek_overload_does_not_garble_the_next_reply(fake_pyvisa, monkeypatch, caplog):
+    """Regression (17 Nov, real 7270 at 0.5 mV sensitivity with ~1.8 mV signal): during an overload
+    the overload byte is not 0, so the status pair has no NUL and a NUL-terminated read ran on
+    into the next reply -- '9\\x03-9.734E-04,-1.5E-03' for an oscillator read.  The lock-in was
+    marked faulted and control of the setup stayed blocked.  The pair is read by count now."""
+    import logging
+
+    import Samba_controls.service.devices.ametek7270 as am
+    li = am.Ametek7270("lockin", {"resource": "TCPIP0::192.168.77.2::50000::SOCKET"})
+    li.connect()
+    inst = fake_pyvisa["rm"].opened[-1]
+    inst.state["OA."] = 1.0
+    inst.status, inst.overload = 0x39, 0x03                              # "9", overload
+    with caplog.at_level(logging.WARNING, logger=am.__name__):
+        for _ in range(5):
+            x, y = li.hw_read_xy()
+            assert x == pytest.approx(1e-4) and y == pytest.approx(-2e-5)
+            assert li.read_attribute("oscillator_V").value == pytest.approx(1.0)
+    assert li.overload_byte == 0x03 and li.missing_chunks == 0 and li.resyncs == 0
+    assert sum("overload" in r.getMessage() for r in caplog.records) == 1     # said once, not per read
+    assert inst.buffer == b"" and li.state.value == "ON"
+    inst.overload = 0
+    li.hw_read_xy()
+    assert li.overload_byte == 0
+
+
+def test_ametek_stray_bytes_resync_instead_of_fault(fake_pyvisa, monkeypatch):
+    """A status pair that turns up late lands in front of the next reply.  The reply cannot be
+    read: the driver re-syncs and asks again; if the stream stays unreadable the read fails, but
+    the lock-in is not marked faulted -- its cleanup (oscillator off) must stay possible."""
+    import Samba_controls.service.devices.ametek7270 as am
+    li = am.Ametek7270("lockin", {"resource": "TCPIP0::192.168.77.2::50000::SOCKET"})
+    li.connect()
+    inst = fake_pyvisa["rm"].opened[-1]
+    inst.state["OA."] = 0.5
+    inst.buffer += b"9\x03"                                              # late, after the flush
+    assert li.read_attribute("oscillator_V").value == pytest.approx(0.5)
+    assert li.resyncs == 1 and li.state.value == "ON" and inst.buffer == b""
+    # an instrument answering garbage every time: the read fails, the device stays usable
+    real = inst.reply_for
+    inst.reply_for = lambda cmd: "garbage" if cmd == "OA." else real(cmd)
+    with pytest.raises(ServiceError) as e:
+        li.read_attribute("oscillator_V")
+    assert e.value.code == ErrorCode.DEVICE_FAULT and "cannot read oscillator_V" in e.value.message
+    assert li.state.value == "ON"
+    inst.reply_for = real
+    assert li.cleanup(None) == [] and inst.log[-1] == "OA. 0"           # the cleanup still works

@@ -363,7 +363,9 @@ class ControlsWindow(QMainWindow):
             QMessageBox.warning(self, "Force release", "Administrators only.")
             return
         if QMessageBox.question(self, "Force release",
-                                "Stop the current owner's operations, run the cleanup and free the setup?"
+                                "Stop the current owner's operations, reconnect faulted instruments, run the "
+                                "cleanup and free the setup?\n\nIf an instrument cannot be reached its cleanup "
+                                "(e.g. the coil or lock-in oscillator off) cannot be confirmed: check it by hand."
                                 ) != QMessageBox.StandardButton.Yes:
             return
         call_async(lambda: c.call("lease.force_release", {}, 120.0),
@@ -503,6 +505,8 @@ class ControlsWindow(QMainWindow):
                 c.logout()
         except ServiceError:
             pass
+        self._timer.stop()                 # no polling into a closed window
+        self.panel._timer.stop()
         self.bridge.close()
         super().closeEvent(ev)
 

@@ -26,6 +26,7 @@ import zmq
 
 from core import protocol
 from core.config.machine import MachineConfig
+from core.model import DevState
 from core.protocol import ErrorCode, ServiceError
 from core.version import PROTOCOL, describe, software_revision
 from Samba_controls.service.auth import AccountStore, SessionManager
@@ -239,7 +240,33 @@ class ServiceServer:
                 log.exception("lease watchdog")
 
     # ================================================================ reconcile
+    def _reconnect_faulted(self, cleanup: dict) -> list[str]:
+        """Before an administrator's forced cleanup: reconnect the devices the cleanup needs that
+        are faulted.  Nobody can reconnect them otherwise while the lease is RECONCILING (a
+        reconnect needs the lease), so without this one faulted device kept the setup blocked
+        until the service was restarted (17 Nov)."""
+        names = []
+        if cleanup.get("stop_stages", True):
+            names += [n for n, d in self.host._devices.items() if d.KIND == "stage"]
+        if cleanup.get("zero_coil", True):
+            names.append("daq")
+        if cleanup.get("lockin_output_off", True):
+            names.append("lockin")
+        done = []
+        for name in names:
+            d = self.host._devices.get(name)
+            if d is None or not d.PHYSICAL or d.state != DevState.FAULT:
+                continue
+            log.warning("forced release: reconnecting faulted %s before the cleanup", name)
+            try:
+                self.host.reconnect(name, 60.0)
+                done.append(name)
+            except ServiceError as exc:
+                log.error("forced release: %s could not be reconnected: %s", name, exc.message)
+        return done
+
     def _reconcile(self, reason: str) -> dict:
+        forced = reason.startswith("forced by administrator")
         if self.host.run_cancel is not None:
             self.host.run_cancel.cancel(f"lease ended: {reason}")
         wait_s = float(self.backend_cfg["reconcile_wait_s"])
@@ -254,12 +281,23 @@ class ServiceServer:
                 cleanup["zero_coil"] = False
             if "lockin" in keep:
                 cleanup["lockin_output_off"] = False
+        reconnected = self._reconnect_faulted(cleanup) if forced and stopped else []
         problems += self.host.cleanup_all(cleanup)
         self.host.run_active = False
         self.host.run_info = None
         self.host.run_devices = None
         report = {"ok": stopped and not problems, "stopped": stopped, "problems": problems}
-        if problems:
+        if reconnected:
+            report["reconnected"] = reconnected
+        if forced and stopped and problems:
+            # An administrator's force must never leave the setup blocked for good: every operation
+            # has stopped, only the cleanup of a device that cannot be reached is unconfirmed.  The
+            # setup is freed; the problems stay in the report and the log for the next holder.
+            report["ok"] = True
+            report["unconfirmed"] = list(problems)
+            log.warning("reconcile (%s): setup freed by the administrator although the cleanup could not be "
+                        "confirmed: %s", reason, problems)
+        elif problems:
             log.error("reconcile (%s): %s", reason, problems)
         else:
             log.info("reconcile (%s): operations stopped, cleanup done", reason)
@@ -450,7 +488,8 @@ class ServiceServer:
         user = self.accounts.verify(p.get("username"), p.get("password"))
         session = self.sessions.create(user, str(p.get("client", "client")))
         log.info("login: %s (%s)", user["username"], session.client)
-        return {"session": session.token, "user": user, "prefs": self.accounts.get_prefs(user["id"])}
+        return {"session": session.token, "user": user, "prefs": self.accounts.get_prefs(user["id"]),
+                "instance_id": self.instance_id}
 
     def _bootstrap(self, s, p, r) -> dict:
         if self.accounts.user_count() != 0:

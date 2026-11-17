@@ -22,6 +22,10 @@ from core.protocol import ErrorCode, ServiceError  # noqa: E402
 from tests.conftest import ADMIN, OPERATOR, start_service  # noqa: E402
 
 PHYSICAL = ["daq", "lockin", "hall", "stage_longitudinal", "stage_polar"]
+# Windows stay referenced until the end of the session: a window deleted mid-session (garbage
+# collected) left its Devices-panel timer and queued replies to fire into freed widgets during a
+# later test -- an intermittent access violation in test_gui (17 Nov).  test_gui does the same.
+_KEEP: list = []
 
 
 @pytest.fixture(scope="module")
@@ -205,6 +209,9 @@ def test_controls_window_lights_follow_a_real_start(qapp, samba_home, monkeypatc
         monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
         w._we_started = False
         w.close()
+        w._timer.stop()
+        w.panel._timer.stop()
+        _KEEP.append(w)
         bridge.close()
     finally:
         svc.stop()
