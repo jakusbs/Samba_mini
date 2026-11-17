@@ -13,15 +13,16 @@ them otherwise).  Readbacks come from the service's readback events.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton
 
 from core.gui.bridge import call_guarded, error_text
-from Samba_mini.panels.widgets import NoScrollDoubleSpinBox
+from core.lockin_ranges import mv_text, sensitivity_ranges, truncated_discrete
+from Samba_mini.panels.widgets import NoScrollComboBox, NoScrollDoubleSpinBox
 
 LOCKIN_FIELDS = [   # param, label, unit, min, max, decimals  (union of the workflows' limits)
     ("volt", "Ampl:", "V", 0.0, 5.0, 3),
-    ("sensi", "Sens:", "V", 1e-9, 1.0, 9),
+    ("sensi", "Sens:", "V", 1e-9, 1.0, 9),          # a list of the 7270's ranges (SensitivityCombo)
     ("lockin_freq", "Freq:", "Hz", 1.0, 102000.0, 1),
     ("time_const", "TC:", "s", 1e-5, 100.0, 5),
     ("phase", "Phase:", "deg", -180.0, 180.0, 2),
@@ -29,6 +30,28 @@ LOCKIN_FIELDS = [   # param, label, unit, min, max, decimals  (union of the work
 
 _VAL = "font-family:Consolas,'Courier New';font-size:13px;color:#a6e3a1;"
 _SMALL = "color:#6c7086;font-size:9px;"
+
+
+class SensitivityCombo(NoScrollComboBox):
+    """The 7270's sensitivity ranges, written in mV (… 0.5 mV, 1 mV, 2 mV …).  The value is in V
+    like the workflow parameter; a value between ranges shows the next range up, which is what
+    the 7270 would use."""
+    valueChanged = pyqtSignal(float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ranges = sensitivity_ranges()
+        for v in self._ranges:
+            self.addItem(mv_text(v), v)
+            self.setItemData(self.count() - 1, f"{v:g} V", Qt.ItemDataRole.ToolTipRole)
+        self.setMaxVisibleItems(14)
+        self.currentIndexChanged.connect(lambda _i: self.valueChanged.emit(self.value()))
+
+    def value(self) -> float:
+        return float(self._ranges[max(self.currentIndex(), 0)])
+
+    def setValue(self, volts: float) -> None:
+        self.setCurrentIndex(self._ranges.index(truncated_discrete(float(volts), self._ranges)))
 
 
 def _readout() -> QLabel:
@@ -54,21 +77,24 @@ class HardwareGroup(QGroupBox):
                                "lock-in; they read it as it is set.")
         lg = QGridLayout(self.li_box)
         lg.setSpacing(3)
-        self.li: dict[str, NoScrollDoubleSpinBox] = {}
+        self.li: dict[str, NoScrollDoubleSpinBox | SensitivityCombo] = {}
         for i, (key, label, unit, lo, hi, dec) in enumerate(LOCKIN_FIELDS):
-            sp = NoScrollDoubleSpinBox()
-            sp.setDecimals(dec)
-            sp.setRange(lo, hi)
-            sp.setSuffix(f" {unit}")
-            sp.setKeyboardTracking(False)
+            if key == "sensi":
+                sp = SensitivityCombo()
+            else:
+                sp = NoScrollDoubleSpinBox()
+                sp.setDecimals(dec)
+                sp.setRange(lo, hi)
+                sp.setSuffix(f" {unit}")
+                sp.setKeyboardTracking(False)
             sp.setMinimumWidth(96)
             sp.valueChanged.connect(self.changed.emit)
             r, c = divmod(i, 2)
             lg.addWidget(QLabel(label), 1 + r, 2 * c)
             lg.addWidget(sp, 1 + r, 2 * c + 1)
             self.li[key] = sp
-        self.li["sensi"].setToolTip("Rounded up to the next 7270 range at run start")
-        self.li["time_const"].setToolTip("Rounded up to the next 7270 value at run start")
+        self.li["sensi"].setToolTip("Sensitivity: one of the 7270's ranges (full scale), sent with Apply now")
+        self.li["time_const"].setToolTip("Rounded up to the next 7270 value by Apply now")
         self.li["volt"].setToolTip("Oscillator amplitude (OA.): drives the sample current through the "
                                    "external source")
         b_apply = QPushButton("Apply now")
@@ -251,7 +277,8 @@ class HardwareGroup(QGroupBox):
                                  ("frequency_Hz", "Freq", "Hz"), ("time_constant_s", "TC", "s"),
                                  ("phase_deg", "Phase", "°")):
             if isinstance(r.get(key), (int, float)):
-                parts.append(f"{label} {r[key]:.4g} {unit}")
+                parts.append(f"Sens {mv_text(r[key])}" if key == "sensitivity_V"
+                             else f"{label} {r[key]:.4g} {unit}")
         self.li_applied.setText("Applied: " + ("  ".join(parts) if parts else str(r)))
 
     def _show_coil_applied(self, r) -> None:

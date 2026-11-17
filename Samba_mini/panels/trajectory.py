@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QGridLayout, QGroupBox, QH
                              QRadioButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from core.scan import plans
-from core.scan.workflows import WORKFLOWS, Workflow
+from core.scan.workflows import WORKFLOWS, Workflow, migrate_params
 from Samba_mini.panels.hardware import HardwareGroup
 from Samba_mini.panels.metadata import MetadataGroup
 from Samba_mini.panels.widgets import (RO_STYLE, NoScrollDoubleSpinBox, NoScrollSpinBox, StepNPair,
@@ -307,7 +307,8 @@ class FieldMonitor(QWidget):
 
 # ============================================================================ timing
 class TimingGroup(QGroupBox):
-    """Samba's Timing box (Int / Settle / T.out) with MiniMoke's timing parameters."""
+    """Samba's Timing box (Int / Settle) with MiniMoke's timing parameters.  One Settle: the
+    wait before measuring after anything changed (a stage move or the coil command)."""
     changed = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -318,13 +319,13 @@ class TimingGroup(QGroupBox):
         self.w = {
             "acq_time": _dspin(1e-5, 600.0, 5, "s", 90),
             "settle_time": _dspin(0.0, 60.0, 3, "s", 90),
-            "field_settle_s": _dspin(0.0, 60.0, 3, "s", 90),
             "interval": _dspin(1e-6, 86400.0, 4, "s", 90),
         }
         tips = {"acq_time": "Int: how long each point is averaged (DAQ window at 50 kHz; the Hall probe "
                             "integrates min(Int, 0.54 s))",
-                "settle_time": "Spatial scans: wait after each stage move before measuring",
-                "field_settle_s": "Spatial scans: wait after the coil command changes (+B → −B)",
+                "settle_time": "Wait before measuring so things have settled:\n"
+                               "spatial scans: after every stage move and every coil change (+B → −B);\n"
+                               "time scans: once, before the first sample (after the stage move and the coil).",
                 "interval": "Time scan only: time from the start of one sample to the start of the next.\n"
                             "Samples N × interval = duration (MiniMoke's 'Sampling interval').\n"
                             "Each sample is averaged for Int; if Int is longer than the interval, the samples\n"
@@ -332,8 +333,7 @@ class TimingGroup(QGroupBox):
         # No "Repeats" field: as in Samba, a measurement is repeated with the Scanlist tab (one file
         # per scan).  MiniMoke's repeat_num is always 1: an X/Y-sweep measures its line once at +B
         # and once at −B, an XY map is measured once.
-        rows = [("Int (s):", "acq_time"), ("Settle (s):", "settle_time"), ("B settle (s):", "field_settle_s"),
-                ("Interval (s):", "interval")]
+        rows = [("Int (s):", "acq_time"), ("Settle (s):", "settle_time"), ("Interval (s):", "interval")]
         self.labels = {}
         for r, (label, key) in enumerate(rows):
             lbl = QLabel(label)
@@ -588,7 +588,7 @@ class TrajectoryPanel(QWidget):
     def set_params(self, key: str, values: dict) -> None:
         if key not in WORKFLOWS:
             return
-        v = dict(values or {})
+        v = migrate_params(values)              # one Settle (earlier versions had two)
         widgets = [self.x_grp, self.y_grp, self.li_box, self.dc_box, self.timing, self.hardware,
                    self.time_move, self.f_move, self.f_x, self.f_y]
         for w in widgets:
@@ -722,18 +722,20 @@ class TrajectoryPanel(QWidget):
             msg = plans.b_sweep_lockin_validation(p["b_min"], p["b_max"], p["b_step"], p["sweep_freq"],
                                                   p["time_const"], p["acq_time"])
             return plan.n_total * p["num_sweeps"], plan.n_total * plan.t_point_s * p["num_sweeps"], msg
+        # Spatial scans move (or change the coil) before every point and then settle.
+        per_point = p.get("acq_time", 0.0) + 0.05 + p.get("settle_time", 0.0)
         if k == "x_sweep":
             n = plans.n_points(p["x_min"], p["x_max"], p["x_step"]) * 2 * p["repeat_num"]
-            return n, n * (p["acq_time"] + 0.05), None
+            return n, n * per_point, None
         if k == "y_sweep":
             n = plans.n_points(p["y_min"], p["y_max"], p["y_step"]) * 2 * p["repeat_num"]
-            return n, n * (p["acq_time"] + 0.05), None
+            return n, n * per_point, None
         if k == "xy_sweep":
             n = (plans.n_points(p["x_min"], p["x_max"], p["x_step"])
                  * plans.n_points(p["y_min"], p["y_max"], p["y_step"]) * p["repeat_num"])
-            return n, n * (p["acq_time"] + 0.05), None
+            return n, n * per_point, None
         n = plans.time_points(p["duration"], p["interval"])
-        return n, max(p["duration"], n * p["acq_time"]), None
+        return n, p["settle_time"] + max(p["duration"], n * p["acq_time"]), None
 
     def summary_text(self) -> str:
         """Samba-style pre-scan estimate for the status line under the plot."""

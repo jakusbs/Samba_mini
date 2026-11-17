@@ -172,7 +172,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     w.trajectory.meta.meta_sample.setText("AliceSample")
     w.trajectory.meta.meta_operator.setText("Alice")
     w.trajectory.meta.meta_notes.setText("annealed")
-    w.calibration.timescan.load({"n": 42, "interval": 0.3, "acq_time": 0.05, "volt": 0.5, "b": 0.125})
+    w.calibration.timescan.load({"n": 42, "acq_time": 0.05, "settle_time": 0.25})
     rec = save_and_activate(w, CAL1, "alice cal")
     w._save_config("longitudinal", "alice trace", "create")
     assert settle(qapp, w) == "saved"
@@ -208,7 +208,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     assert w.trajectory.working_state() == a_state
     assert w.trajectory.meta.meta_sample.text() == "AliceSample"
     assert w.trajectory.meta.meta_operator.text() == "Alice"
-    assert w.calibration.timescan.values()["n"] == 42 and w.calibration.timescan.values()["volt"] == 0.5
+    assert w.calibration.timescan.values() == {"n": 42, "acq_time": 0.05, "settle_time": 0.25}
     assert w.bd_panel.active()["record"]["id"] == rec["id"] and w.bd_panel.get_calibration() == CAL1
     assert w.config_list.current_name() == "alice trace"
     assert w.plot1d._kerr_cal.ok and w.plot1d._kerr_cal.mv == CAL1
@@ -374,21 +374,27 @@ def test_calibration_scan_uses_its_own_settings_and_is_fitted_for_review(qapp, a
     w.dir_edit.setText(str(tmp_path / "data"))
     w.trajectory.set_workflow("x_sweep")
     w.trajectory.hardware.li["volt"].setValue(1.5)                       # what the Hardware box shows now
+    w.trajectory.hardware.li["time_const"].setValue(0.1)
     w.trajectory.set_params("time", {"volt": 0.75, "lockin_freq": 999.0})  # parked time-scan values
-    w.calibration.timescan.load({"n": 6, "interval": 0.05, "acq_time": 0.01, "volt": 0.2, "lockin_freq": 1234.0,
-                                 "time_const": 0.1, "b": 0.0})
-    p = w.calibration_scan_params()
-    assert p["volt"] == 0.2 and p["lockin_freq"] == 1234.0 and p["position_stage"] is False
-    w._copy_hardware_to_calibration_scan()
-    assert w.calibration.timescan.values()["volt"] == 1.5                # explicit copy from what is shown
-    w.calibration.timescan.load({"volt": 0.2, "lockin_freq": 1234.0})
+    w.calibration.timescan.load({"n": 6, "acq_time": 0.01, "settle_time": 0.2})
+    p = w.calibration_scan_params(0.125)
+    assert p["volt"] == 1.5 and p["position_stage"] is False             # the Hardware box, for comparison
+    assert p["b"] == 0.125 and p["interval"] == p["acq_time"] == 0.01 and p["duration"] == pytest.approx(0.06)
+    assert p["settle_time"] == 0.2
+    c = w.bridge.client
+    c.acquire_lease()
+    c.device("daq").command("set_outputs", coil_V=0.2)                  # the coil as it is now
     w.live_tabs.setCurrentWidget(w.calibration)
     w.start_run()
     assert wait_until(qapp, lambda: not w._calib_run, 60)
     from core.storage.hdf5_writer import read_file
-    meta = read_file(w.engine.result["path"])["metadata"]
+    res = w.engine.result
+    assert res["points"] == 6
+    meta = read_file(res["path"])["metadata"]
     applied = json.loads(meta["params_json"])
-    assert applied["volt"] == 0.2 and applied["lockin_freq"] == 1234.0
+    assert applied["b"] == pytest.approx(0.2) and applied["settle_time"] == 0.2   # measured with the coil as it was
+    assert meta["coil_after_run_V"] == pytest.approx(0.2)
+    assert c.device("daq").read("coil_command_V")["coil_command_V"].value == pytest.approx(0.2)   # left so
     # the acquisition result went straight to the fitting step (a 6-point simulated trace does not
     # fit; that is reported, without a dialog and without touching the editor)
     pump(qapp, 0.3)
@@ -454,21 +460,27 @@ def test_presets_never_change_sample_or_calibration(qapp, accounts, monkeypatch)
     assert w.trajectory.meta.meta_sample.text() == "S2" and w.trajectory.meta.meta_operator.text() == "Alice"
     assert w.bd_panel.active()["record"]["id"] == rec["id"]
 
-    # A configuration saved by the earlier version still carries a sample: applied only on request.
+    # A configuration saved by the earlier version still carries a sample: ignored, without asking
+    # (it used to ask on every click, 2026-11-17); saving the configuration drops it.
     w.bridge.client.call("presets.save", {"workflow": "samba_mini/longitudinal", "name": "legacy", "value": {
         "workflow": "time", "params": {"duration": 2.0},
         "metadata": {"sample_id": "OLD", "operator": "Former", "incidence": "LMOKE"}}})
     w._reload_configs()
     asked.clear()
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[1]) or QMessageBox.StandardButton.No)
-    w._load_config("longitudinal", "legacy")
-    assert asked == ["Sample information in this configuration"]
-    assert w.trajectory.meta.meta_sample.text() == "S2" and w.bd_panel.active()["record"]["id"] == rec["id"]
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[1]) or QMessageBox.StandardButton.Yes)
-    w._load_config("longitudinal", "trace")
+    logs = []
+    monkeypatch.setattr(w, "_log", lambda level, msg: logs.append(msg))
+    for _ in range(2):
+        w._load_config("longitudinal", "legacy")
+        w._load_config("longitudinal", "trace")
+    assert asked == []
+    assert w.trajectory.meta.meta_sample.text() == "S2" and w.trajectory.meta.meta_operator.text() == "Alice"
+    assert w.bd_panel.active()["record"]["id"] == rec["id"]
+    assert any("'legacy' was saved by an earlier Samba_mini" in m and "'OLD'" in m for m in logs)
     w._load_config("longitudinal", "legacy")
-    assert w.trajectory.meta.meta_sample.text() == "OLD"                 # explicit, then the sample check ran:
-    assert asked[-1] == "New sample" and w.bd_panel.active() is None
+    assert w._save_config("longitudinal", "legacy", "update")
+    stored = w.bridge.client.call("presets.get", {"workflow": "samba_mini/longitudinal", "name": "legacy"})
+    assert "sample_id" not in stored["value"]["metadata"] and "operator" not in stored["value"]["metadata"]
     close(w)
 
 

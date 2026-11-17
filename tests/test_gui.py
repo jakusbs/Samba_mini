@@ -172,7 +172,7 @@ def test_samba_mini_xy_map_ui(qapp, service, tmp_path):
 ROUND_TRIP = {"b_min": -0.3, "b_max": 0.45, "b_step": 0.015, "sweep_freq": 0.05, "num_sweeps": 3, "x": 12.5,
               "y": -7.25, "position_stage": False, "volt": 0.75, "sensi": 2e-4, "lockin_freq": 2345.6,
               "time_const": 0.2, "phase": 12.5, "acq_time": 0.3, "x_min": -20.0, "x_max": 30.0, "x_step": 2.5,
-              "y_min": 5.0, "y_max": 15.0, "y_step": 0.5, "b": 0.12, "repeat_num": 2, "field_settle_s": 0.4,
+              "y_min": 5.0, "y_max": 15.0, "y_step": 0.5, "b": 0.12, "repeat_num": 2,
               "settle_time": 0.15, "record_hall": False, "duration": 12.0, "interval": 0.25}
 
 
@@ -334,18 +334,34 @@ def test_digit_jog_moves_by_the_clicked_digit(qapp, service):
     bridge.client.login(*ADMIN)
     w._after_login()
     bridge.client.acquire_lease()
-    jx = w.calibration.jogs["x"]
+    jx = w.calibration.jogs["x"]                                     # the tab shows µm
     assert wait_until(qapp, lambda: jx._pos is not None, 20)       # read after login
     start = jx._pos
-    assert [d.text() for d in jx._digits] == list(f"{abs(round(start, 5)):08.5f}".replace(".", ""))
-    jx._buttons[2 * 1].click()                                       # ▲ of the 1 mm digit
+    assert [d.text() for d in jx._digits] == list(f"{abs(round(start * 1000, 2)):08.2f}".replace(".", ""))
+    jx._buttons[2 * 1].click()                                       # ▲ of the 1000 µm digit
     assert wait_until(qapp, lambda: abs(jx._pos - (start + 1.0)) < 1e-4, 30)
-    jx._buttons[2 * 4 + 1].click()                                   # ▼ of the 0.001 mm digit
+    jx._buttons[2 * 4 + 1].click()                                   # ▼ of the 1 µm digit
     assert wait_until(qapp, lambda: abs(jx._pos - (start + 0.999)) < 1e-4, 30)
-    jx.edit.setText("0.25")
-    jx.edit.returnPressed.emit()                                     # typed absolute target
+    jx._buttons[2 * 6].click()                                       # ▲ of the 0.01 µm digit (10 nm)
+    assert wait_until(qapp, lambda: abs(jx._pos - (start + 0.99901)) < 1e-6, 30)
+    jx.edit.setText("250")
+    jx.edit.returnPressed.emit()                                     # typed absolute target, in µm
     assert wait_until(qapp, lambda: abs(jx._pos - 0.25) < 1e-4, 30)
-    assert jx.um.text() == "= +250.00 µm"
+    assert [d.text() for d in jx._digits] == list("0025000")
+    assert jx.hint.text() == "= +0.25000 mm"
+    dim = [jx._DIM in d.styleSheet() for d in jx._digits]
+    assert dim == [True, True, False, False, False, False, False]    # leading zeros dimmed
+    # the Alignment window: the same stage in mm, for coarse moves
+    w.calibration.open_alignment()
+    ax = w.calibration.align.jogs["x"]
+    assert ax.unit == "mm" and wait_until(qapp, lambda: ax._pos is not None, 20)
+    assert [d.text() for d in ax._digits] == list("00250")
+    ax._buttons[2 * 1].click()                                       # ▲ of the 1 mm digit
+    assert wait_until(qapp, lambda: abs(jx._pos - 1.25) < 1e-4, 30)  # both views follow
+    assert wait_until(qapp, lambda: ax._pos is not None and abs(ax._pos - 1.25) < 1e-4, 10)
+    ax.edit.setText("0.5")
+    ax.edit.returnPressed.emit()                                     # typed in mm there
+    assert wait_until(qapp, lambda: abs(jx._pos - 0.5) < 1e-4, 30)
     w.set_setup("polar")                    # the other stage: no jogging until its position is read
     assert not any(b.isEnabled() for b in w.calibration.jogs["x"]._buttons)
     assert wait_until(qapp, lambda: w.calibration.jogs["x"]._pos is not None, 20)
@@ -466,7 +482,7 @@ def test_calibration_tab_measures_only_on_start(qapp, service, tmp_path):
         qapp.processEvents()
         time.sleep(0.02)
     assert all(not v for v in w.calibration.plot.data.values())
-    w.calibration.timescan.load({"n": 6, "interval": 0.05, "acq_time": 0.01})
+    w.calibration.timescan.load({"n": 6, "acq_time": 0.01, "settle_time": 0.0})
     w.trajectory.set_params("time", {"time_const": 0.1, "volt": 0.0})
     w.start_run()
     assert w._calib_run
@@ -498,7 +514,7 @@ def test_stage_can_be_moved_during_a_calibration_scan(qapp, service, tmp_path):
     assert wait_until(qapp, lambda: jx._pos is not None, 20)
     start = jx._pos
     w.live_tabs.setCurrentWidget(w.calibration)
-    w.calibration.timescan.load({"n": 80, "interval": 0.05, "acq_time": 0.01})
+    w.calibration.timescan.load({"n": 80, "acq_time": 0.05, "settle_time": 0.0})
     w.trajectory.set_params("time", {"time_const": 0.1, "volt": 0.0})
     w.start_run()
     assert w._calib_run and w.calibration.stage_box.isEnabled()
@@ -515,6 +531,8 @@ def test_stage_can_be_moved_during_a_calibration_scan(qapp, service, tmp_path):
                                         "time_const": 0.1})
     w.start_run()
     assert not w.calibration.stage_box.isEnabled()
+    w.calibration.open_alignment()
+    assert not w.calibration.align.body.isEnabled()                   # the Alignment window too
     w.abort_run()
     assert wait_until(qapp, lambda: w.start_btn.isEnabled(), 60)      # the window has handled the end
     assert w.calibration.stage_box.isEnabled()
