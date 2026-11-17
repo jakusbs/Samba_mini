@@ -588,6 +588,42 @@ def test_ametek_overload_does_not_garble_the_next_reply(fake_pyvisa, monkeypatch
     assert li.overload_byte == 0
 
 
+def test_ametek_overload_at_the_edge_of_the_range_is_logged_sparingly(fake_pyvisa, monkeypatch, caplog):
+    """17 Nov: a signal at the edge of the range flipped the overload byte every few seconds, and
+    each flip wrote a warning or a "cleared" line.  Now: one warning per 5 min with a count, and
+    "no overload" only after a minute without one."""
+    import logging
+
+    import Samba_controls.service.devices.ametek7270 as am
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(am, "_now", lambda: clock["t"])
+    li = am.Ametek7270("lockin", {"resource": "TCPIP0::192.168.77.2::50000::SOCKET"})
+    li.connect()
+    inst = fake_pyvisa["rm"].opened[-1]
+
+    def reads(n, overload, step_s=2.0):
+        for _ in range(n):
+            inst.overload = overload
+            li.hw_read_xy()
+            clock["t"] += step_s
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if r.name == am.__name__ and r.levelno >= logging.INFO
+                and ("overload" in r.getMessage())]
+
+    with caplog.at_level(logging.INFO, logger=am.__name__):
+        for _ in range(30):                                   # 4 min flipping on and off
+            reads(2, 0x03)
+            reads(2, 0)
+        assert len(lines()) == 1 and "overload byte 0x03" in lines()[0]   # one warning, no "cleared"
+        reads(40, 0x03)                                       # still overloaded after 5 min
+        assert len(lines()) == 2 and "overloaded replies in the last" in lines()[1]
+        reads(31, 0)                                          # a minute without overload
+        assert lines()[-1] == "7270: no overload for 60 s"
+        reads(1, 0x03)                                        # a new overload: said at once
+        assert len(lines()) == 4 and "overloaded replies" not in lines()[-1]
+
+
 def test_ametek_stray_bytes_resync_instead_of_fault(fake_pyvisa, monkeypatch):
     """A status pair that turns up late lands in front of the next reply.  The reply cannot be
     read: the driver re-syncs and asks again; if the stream stays unreadable the read fails, but
