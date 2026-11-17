@@ -41,6 +41,7 @@ class Device:
     """
 
     KIND = "device"
+    DEFAULT_LABEL = ""
     PHYSICAL = True
     ATTRIBUTES: list[AttributeInfo] = []
     COMMANDS: list[CommandInfo] = []
@@ -55,6 +56,10 @@ class Device:
         self.name = name
         self.config = dict(config or {})
         self.simulated = simulated
+        #: display name (machine configuration ``label``); ``name`` is the fixed id
+        self.label = str(self.config.get("label") or self.DEFAULT_LABEL or name)
+        #: devices connect one after another at service start, lowest first
+        self.start_order = int(self.config.get("start_order", 100))
         self.state = DevState.OFF
         self.status = "not connected"
         self.last_error: dict | None = None
@@ -99,6 +104,8 @@ class Device:
     def info(self) -> dict:
         return {
             "name": self.name,
+            "label": self.label,
+            "start_order": self.start_order,
             "kind": self.KIND,
             "physical": self.PHYSICAL,
             "simulated": self.simulated,

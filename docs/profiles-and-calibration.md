@@ -38,6 +38,13 @@ programs of the same Windows user.
   so the stored values are never overwritten with defaults.
 * **One data folder**: the action bar's `Dir:` and the Profile tab's *Data
   folder* edit the same preference.
+* **Each account has its own data folder**: `Documents\SambaMini Data\<user name>`
+  (the root can be moved with `SAMBA_MINI_DATA_ROOT`), created at login; runs,
+  scanlists, the lab notebook and the Data Browser use it.  An account whose
+  saved folder is the shared root (the default of earlier versions) is moved
+  to its own folder at login; a folder the user chose is kept, and *Own
+  folder* in the Profile tab goes back.  Existing files are not moved by the
+  software.
 * **Configurations** (explicit): **+** saves the current settings under a new
   name (refused if the name exists), **S** saves them into the selected
   configuration, **C** copies the *saved* selected configuration, **R**

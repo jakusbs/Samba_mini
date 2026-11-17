@@ -158,7 +158,9 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     w = open_window(service)
     calls = spy_calls(w.bridge.client)
     login(w, OPERATOR)
-    defaults_dir = w.dir_edit.text()
+    from core import paths
+    root = str(paths.default_measurement_dir())
+    assert paths.same_path(w.dir_edit.text(), paths.user_measurement_dir("alice"))   # own folder
     defaults_params = w.trajectory.working_state()
     defaults_scan = w.calibration.timescan.values()
     assert w.trajectory.meta.meta_operator.text() == "Alice A"           # default operator = full name
@@ -179,7 +181,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     # --- logout: nothing of A stays on screen
     w._login_logout()
     assert not w.bridge.client.session
-    assert w.dir_edit.text() == defaults_dir and w.profile.data_dir.text() == defaults_dir
+    assert w.dir_edit.text() == root and w.profile.data_dir.text() == root          # logged out: shared root
     assert w.trajectory.meta.meta_sample.text() == "" and w.trajectory.meta.meta_operator.text() == ""
     assert w.trajectory.meta.meta_notes.text() == ""
     assert w.trajectory.working_state() == defaults_params
@@ -191,7 +193,7 @@ def test_user_switch_resets_everything_and_restores_each_users_state(qapp, accou
     # --- user B with empty preferences: explicit defaults, not A's leftovers
     login(w, BOB)
     assert w.bridge.client.user["username"] == "bob"
-    assert w.dir_edit.text() == defaults_dir
+    assert paths.same_path(w.dir_edit.text(), paths.user_measurement_dir("bob"))   # bob's own, not alice's
     assert w.trajectory.meta.meta_sample.text() == ""
     assert w.trajectory.meta.meta_operator.text() == "Bob B"
     assert w.trajectory.working_state() == defaults_params
@@ -575,7 +577,7 @@ def test_controls_device_panel_ignores_late_info_and_binds_commands(qapp, accoun
     gate.set()                                                           # the daq answer arrives late ...
     pump(qapp, 0.5)
     assert panel.name == "lockin" and panel.info["name"] == "lockin"     # ... and is ignored
-    assert panel.title.text().startswith("lockin")
+    assert "·  lockin" in panel.title.text()                           # display name · device id
     buttons = [b for b in panel.cmd_box.findChildren(type(panel.read_btn)) if b.property("device")]
     assert buttons and {b.property("device") for b in buttons} == {"lockin"}
     # A command button built for the lock-in never retargets: after selecting the DAQ it does nothing.

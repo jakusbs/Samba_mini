@@ -523,6 +523,7 @@ class MainWindow(QMainWindow):
             self._log("warning", f"Unsaved changes of {stash.get('user')} from an expired session were "
                       "discarded (another account logged in).")
         self._session_user = user
+        self._resolve_data_folder(user)
         self.user_lbl.setText(f"{user.get('username')} ({user.get('role')})")
         self.login_btn.setText("Log out")
         setup = self.store.get("setup")
@@ -534,6 +535,31 @@ class MainWindow(QMainWindow):
         self._log("info", f"Logged in as {user.get('username')}")
         if err:
             self._log("error", f"Preferences {err}")
+
+    def _resolve_data_folder(self, user: dict) -> None:
+        """Each account measures into its own folder, ``<root>\\<user name>`` (created here),
+        unless it chose another one.  A saved folder equal to the shared root -- the default of
+        earlier versions -- becomes the account's own folder; the lab notebook's earlier default
+        (a file in the shared root) then follows the data folder too."""
+        root = paths.default_measurement_dir()
+        own = paths.user_measurement_dir(user.get("username"))
+        cur = self.store.get("data_dir")
+        if not cur or paths.same_path(cur, root):
+            self.store.set("data_dir", str(own))
+            if cur:
+                self._log("info", f"Data folder: your own folder {own} (was the shared {root}).")
+        notebook = self.store.get("lab_notebook")
+        if notebook and paths.same_path(notebook, root / "lab_notebook_SambaMini.csv"):
+            self.store.set("lab_notebook", None)          # <data folder>\lab_notebook_SambaMini.csv
+        folder = self.store.get("data_dir")
+        try:
+            os.makedirs(os.path.expanduser(folder), exist_ok=True)
+        except OSError as exc:
+            self._log("warning", f"Data folder {folder} could not be created: {exc}")
+
+    def own_data_folder(self) -> str | None:
+        user = self._session_user
+        return str(paths.user_measurement_dir(user.get("username"))) if user else None
 
     def _apply_session(self, user: dict | None, setup: str) -> None:
         self._restoring = True

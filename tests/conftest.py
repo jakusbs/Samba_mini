@@ -12,6 +12,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("SAMBA_MINI_FAST_HASH", "1")
+# Per-user data folders are created at login: never in the real Documents folder during tests.
+import tempfile  # noqa: E402
+
+os.environ.setdefault("SAMBA_MINI_DATA_ROOT", tempfile.mkdtemp(prefix="samba-mini-data-"))
 
 ADMIN = ("admin", "admin-password-1")
 OPERATOR = ("alice", "alice-password-1")
@@ -27,6 +31,7 @@ def free_port() -> int:
 def samba_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("SAMBA_MINI_HOME", str(home))
+    monkeypatch.setenv("SAMBA_MINI_DATA_ROOT", str(tmp_path / "measurements"))
     return home
 
 

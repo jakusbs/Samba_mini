@@ -25,6 +25,7 @@ HALL_MIN_ACQ_S = 0.002   # MiniMoke: fastest valid Hall reading per point
 
 
 class Magnet(Device):
+    DEFAULT_LABEL = "Magnet (coil command + Hall probe, logical)"
     KIND = "magnet"
     PHYSICAL = False
 
@@ -108,6 +109,7 @@ class Magnet(Device):
 
 
 class MokeSequencer(Device):
+    DEFAULT_LABEL = "MOKE sequencer (logical)"
     KIND = "moke"
     PHYSICAL = False
 

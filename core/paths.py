@@ -59,9 +59,30 @@ def accounts_db_path() -> Path:
 
 
 def default_measurement_dir() -> Path:
-    """Fallback data folder when a user has not chosen one."""
+    """The shared root of the measurement folders (``Documents\\SambaMini Data``).
+
+    Each account measures into its own sub-folder (``user_measurement_dir``);
+    the root itself is only the fallback while nobody is logged in.
+    ``SAMBA_MINI_DATA_ROOT`` overrides it (tests, portable installs)."""
+    override = os.environ.get("SAMBA_MINI_DATA_ROOT")
+    if override:
+        return Path(override)
     docs = Path(os.path.expanduser("~")) / "Documents"
     return docs / "SambaMini Data"
+
+
+def user_measurement_dir(username: str) -> Path:
+    """An account's own default data folder: ``<root>\\<user name>``."""
+    safe = "".join(ch for ch in str(username or "") if ch.isalnum() or ch in "._-").strip(".") or "user"
+    return default_measurement_dir() / safe
+
+
+def same_path(a, b) -> bool:
+    """True when two folder paths name the same place (case, slashes, trailing separators)."""
+    if not a or not b:
+        return False
+    norm = lambda p: os.path.normcase(os.path.normpath(os.path.expanduser(str(p))))  # noqa: E731
+    return norm(a) == norm(b)
 
 
 def _ensure(path: Path) -> Path:

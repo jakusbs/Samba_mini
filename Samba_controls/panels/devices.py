@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpi
 from core.gui.bridge import call_guarded, error_text
 from core.theme import STATUS_COLORS
 
-COLUMNS = ["Device", "Kind", "State", "Status", "Busy", "Identity"]
+COLUMNS = ["Device", "Id", "Kind", "State", "Status", "Busy", "Identity"]
+C_LABEL, C_ID, C_KIND, C_STATE, C_STATUS, C_BUSY, C_IDENT = range(len(COLUMNS))
 
 
 class DeviceTable(QTableWidget):
@@ -29,16 +30,21 @@ class DeviceTable(QTableWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         hh = self.horizontalHeader()
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        for i in (0, 1, 2, 4):
+        hh.setSectionResizeMode(C_STATUS, QHeaderView.ResizeMode.Stretch)
+        for i in (C_LABEL, C_ID, C_KIND, C_STATE, C_BUSY):
             hh.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         self.itemSelectionChanged.connect(self._sel)
         self._rows: dict[str, int] = {}
 
     def _sel(self):
         r = self.currentRow()
-        if r >= 0:
-            self.selected.emit(self.item(r, 0).text())
+        if r >= 0 and self.item(r, C_ID) is not None:
+            self.selected.emit(self.item(r, C_ID).text())        # the fixed device id
+
+    def select_device(self, name: str) -> None:
+        r = self._rows.get(name)
+        if r is not None:
+            self.selectRow(r)
 
     def update_devices(self, devices: list[dict]) -> None:
         names = [d["name"] for d in devices]
@@ -51,7 +57,7 @@ class DeviceTable(QTableWidget):
             status = d.get("status") or ""
             sim = " (simulated)" if d.get("simulated") and "simulated" not in status else ""
             kind = d["kind"] + ("" if d.get("physical") else " · logical")
-            vals = [d["name"], kind, d["state"], status + sim,
+            vals = [d.get("label") or d["name"], d["name"], kind, d["state"], status + sim,
                     d.get("busy_with") or ("yes" if d.get("busy") else ""),
                     " ".join(str(x) for x in (ident.get("model"), ident.get("serial") or "",
                                               ident.get("resource") or "") if x)]
@@ -62,16 +68,19 @@ class DeviceTable(QTableWidget):
                     self.setItem(r, c, it)
                 it.setText(str(v))
             color = STATUS_COLORS.get(d["state"], "#cdd6f4")
-            self.item(r, 2).setForeground(QColor(color))
-            self.item(r, 2).setData(Qt.ItemDataRole.ToolTipRole, (d.get("last_error") or {}).get("message", ""))
+            self.item(r, C_STATE).setForeground(QColor(color))
+            self.item(r, C_STATE).setData(Qt.ItemDataRole.ToolTipRole,
+                                          (d.get("last_error") or {}).get("message", ""))
+            self.item(r, C_LABEL).setData(Qt.ItemDataRole.ToolTipRole,
+                                          f"Display name; the device id used by measurements is {d['name']!r}")
 
     def set_state(self, name: str, state: str, status: str) -> None:
         r = self._rows.get(name)
         if r is None:
             return
-        self.item(r, 2).setText(state)
-        self.item(r, 2).setForeground(QColor(STATUS_COLORS.get(state, "#cdd6f4")))
-        self.item(r, 3).setText(status)
+        self.item(r, C_STATE).setText(state)
+        self.item(r, C_STATE).setForeground(QColor(STATUS_COLORS.get(state, "#cdd6f4")))
+        self.item(r, C_STATUS).setText(status)
 
 
 class DevicePanel(QWidget):
@@ -229,7 +238,7 @@ class DevicePanel(QWidget):
         self.info = info
         ident = info.get("identity") or {}
         sim = "  — SIMULATED" if info.get("simulated") else ""
-        self.title.setText(f"{info['name']}  ({info['kind']}){sim}")
+        self.title.setText(f"{info.get('label') or info['name']}  ·  {info['name']} ({info['kind']}){sim}")
         self._show_state(info.get("state", ""), info.get("status", ""))
         attrs = info["attributes"]
         self.attr_table.setRowCount(len(attrs))

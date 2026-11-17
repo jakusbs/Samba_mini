@@ -28,6 +28,7 @@ class ProfilePanel(QWidget):
         self._bridge = bridge_getter
         self.store = store
         self._loading = False
+        self._user: dict | None = None
         lay = QHBoxLayout(self)
         box = QGroupBox("My preferences")
         g = QGridLayout(box)
@@ -55,6 +56,10 @@ class ProfilePanel(QWidget):
         g.addWidget(QLabel("Data folder"), 1, 0)
         g.addWidget(self.data_dir, 1, 1, 1, 2)
         g.addWidget(browse, 1, 3)
+        self.own_btn = QPushButton("Own folder")
+        self.own_btn.setToolTip("Back to your own folder under the shared data folder")
+        self.own_btn.clicked.connect(self._own_folder)
+        g.addWidget(self.own_btn, 1, 4)
         g.addWidget(QLabel("Default operator"), 2, 0)
         g.addWidget(self.operator, 2, 1, 1, 2)
         g.addWidget(QLabel("Lab notebook CSV"), 3, 0)
@@ -66,7 +71,10 @@ class ProfilePanel(QWidget):
         g.setRowStretch(6, 1)                     # extra height below the fields, not between them
         g.setColumnStretch(1, 1)
         lay.addWidget(box, 2)
-        note = QLabel("Saved automatically to your account by the device service on this PC: these "
+        note = QLabel("Data folder: every account measures into its own folder (Documents\\SambaMini Data\\"
+                      "<user name>, created at login) and the Data Browser shows that folder. You can choose "
+                      "another folder here or in the Dir: field; \"Own folder\" goes back.\n\n"
+                      "Saved automatically to your account by the device service on this PC: these "
                       "preferences, and per setup your measurement draft, the current experiment (sample, "
                       "operator, notes) and the calibration-scan settings.\n\n"
                       "Named configurations (left list) and λ/2 calibrations (BD Calibration tab) are saved only "
@@ -90,6 +98,10 @@ class ProfilePanel(QWidget):
         if d:
             self.data_dir.setText(d)
 
+    def _own_folder(self) -> None:
+        if self._user:
+            self.data_dir.setText(str(paths.user_measurement_dir(self._user.get("username"))))
+
     def _edited(self, key: str, value) -> None:
         if not self._loading:
             self.store.set(key, value)
@@ -103,6 +115,7 @@ class ProfilePanel(QWidget):
 
     def load(self, user: dict | None) -> None:
         """Show the store's values (called after the store was reset for a session)."""
+        self._user = user
         self._loading = True
         try:
             self.user_lbl.setText(f"{user['username']} ({user['role']})" if user else "Not logged in")
@@ -112,7 +125,7 @@ class ProfilePanel(QWidget):
             self.csv.setChecked(bool(self.store.get("export_csv", False)))
         finally:
             self._loading = False
-        for w in list(self._fields.values()) + [self.csv]:
+        for w in list(self._fields.values()) + [self.csv, self.own_btn]:
             w.setEnabled(user is not None)
 
     def _show_state(self, state: str, text: str) -> None:

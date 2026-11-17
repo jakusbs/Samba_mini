@@ -19,6 +19,8 @@ reconcile_wait_s = 60.0      # how long to wait for operations to stop before fr
 
 [daq]                        # NI-DAQ (MiniMoke configs/dac_config.ini)
 enabled = true
+label = "NI-DAQ"             # display name (Samba_controls); the id "daq" never changes
+start_order = 10             # instruments connect one after another at start, lowest first
 device = "Dev1"
 ao_mod1 = "Dev1/ao1"         # AC_Output1
 ao_mod2 = "Dev1/ao2"         # AC_Output2
@@ -38,6 +40,8 @@ max_V = 6.0
 
 [lockin]                     # Ametek / Signal Recovery 7270
 enabled = true
+label = "Lock-in (Ametek 7270)"
+start_order = 20
 model = "ametek7270"
 resource = "TCPIP0::<lock-in IP>::50000::SOCKET"   # or "USB0::0x0A2D::0x001B::<serial>::RAW"
 timeout_ms = 2000
@@ -47,12 +51,16 @@ max_oscillator_V = 5.0
 
 [hall]                       # Magnet-Physik USB Teslameter (pythonnet)
 enabled = true
+label = "Hall probe (Magnet-Physik)"
+start_order = 30
 dll_path = "%USERPROFILE%\\Documents\\<MiniMoke folder>\\libs\\MagnetPhysik.Usb.dll"   # 64-bit build
 speed = 1                    # 470 samples/s
 default_integration_s = 0.5
 
 [stages.longitudinal]        # Thorlabs Kinesis via pylablib (close the Kinesis GUI first)
 enabled = true
+label = "Longitudinal stage (Thorlabs Kinesis)"
+start_order = 40
 driver = "kinesis"
 serial_x = "<serial>"
 serial_y = "<serial>"
@@ -64,6 +72,8 @@ move_timeout_s = 120.0
 
 [stages.polar]               # Trinamic TMCM-3212 via pytrinamic
 enabled = true
+label = "Polar stage (Trinamic TMCM-3212)"
+start_order = 50
 driver = "trinamic"
 port = "auto"
 module_id = 1
