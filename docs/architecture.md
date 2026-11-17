@@ -276,7 +276,11 @@ the owners' workers).  Logical devices never open hardware themselves.
 
 ### 3.6 Data
 
-HDF5 follows Samba's layout (`/data` datasets with `role`/`label`/`unit`,
+HDF5 follows Samba's layout (`/data` datasets with `role`/`label`/`unit`;
+measured channels are saved under the names given in Samba_controls' Channels
+tab, as Samba saves sensors under their labels, each with its fixed `channel`
+id, `device`, physical `line` and plot `y_axis` as attributes -- only the
+channels ticked in the sensor rows are measured and saved;
 `/metadata` attributes, root `scan_status`, `scan_type`), plus Samba_mini
 provenance: user, sample, operator, `mode` (`real`/`simulation`), workflow
 parameters (JSON), machine configuration and calibration snapshot, device

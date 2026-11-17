@@ -320,7 +320,6 @@ class TimingGroup(QGroupBox):
             "settle_time": _dspin(0.0, 60.0, 3, "s", 90),
             "field_settle_s": _dspin(0.0, 60.0, 3, "s", 90),
             "interval": _dspin(1e-6, 86400.0, 4, "s", 90),
-            "record_hall": QCheckBox("Record Hall"),
         }
         tips = {"acq_time": "Int: how long each point is averaged (DAQ window at 50 kHz; the Hall probe "
                             "integrates min(Int, 0.54 s))",
@@ -329,8 +328,7 @@ class TimingGroup(QGroupBox):
                 "interval": "Time scan only: time from the start of one sample to the start of the next.\n"
                             "Samples N × interval = duration (MiniMoke's 'Sampling interval').\n"
                             "Each sample is averaged for Int; if Int is longer than the interval, the samples\n"
-                            "simply follow one another.",
-                "record_hall": "Read the Hall probe at every point (MiniMoke always did)"}
+                            "simply follow one another."}
         # No "Repeats" field: as in Samba, a measurement is repeated with the Scanlist tab (one file
         # per scan).  MiniMoke's repeat_num is always 1: an X/Y-sweep measures its line once at +B
         # and once at −B, an XY map is measured once.
@@ -342,7 +340,7 @@ class TimingGroup(QGroupBox):
             self.labels[key] = lbl
             g.addWidget(lbl, r, 0)
             g.addWidget(self.w[key], r, 1)
-        g.addWidget(self.w["record_hall"], len(rows), 0, 1, 2)
+        # The Hall probe is read when its channel is ticked in the sensor rows (no separate box).
         for key, w in self.w.items():
             w.setToolTip(tips[key])
             (w.toggled if isinstance(w, QCheckBox) else w.valueChanged).connect(self.changed.emit)

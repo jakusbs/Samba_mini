@@ -136,7 +136,11 @@ created at login and shown in the Data Browser (a user can choose another one in
 the Profile tab; *Own folder* goes back).
 
 `<data folder>\<YYYYMMDD>\<HHMMSS>_<TYPE>_<sample>_<config>[_SIM].h5`, Samba
-layout (opens in Samba's data browser).  `scan_status` is `running` until the
+layout (opens in Samba's data browser).  Only the channels ticked in Samba_mini's
+sensor rows are measured and saved, each under its name from Samba_controls'
+*Channels* tab (e.g. `/data/BD`, `/data/Focus_line`) with its channel id as an
+attribute; files written before channel names keep `/data/dc_signal` etc.  No
+standard deviations are recorded.  `scan_status` is `running` until the
 run ends, then `completed`, `aborted`, `failed` or `interrupted`.
 
 Recovery guarantees: points are written as they arrive; the file is flushed

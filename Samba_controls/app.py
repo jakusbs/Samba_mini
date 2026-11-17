@@ -28,6 +28,7 @@ from core.theme import app_style
 from core.version import __version__
 from Samba_controls.panels import admin as admin_panel
 from Samba_controls.panels.admin import ConfigPanel, UsersPanel
+from Samba_controls.panels.channel_editor import ChannelEditor
 from Samba_controls.panels.device_editor import DeviceEditor
 from Samba_controls.panels.devices import DevicePanel, DeviceTable
 from Samba_controls.panels.lights import StartupLights
@@ -126,6 +127,8 @@ class ControlsWindow(QMainWindow):
         self.bottom.addTab(self.cfg, "Machine configuration")
         self.devedit = DeviceEditor(lambda: self.bridge)
         self.bottom.addTab(self.devedit, "Device settings")
+        self.chanedit = ChannelEditor(lambda: self.bridge)
+        self.bottom.addTab(self.chanedit, "Channels")
         vs.addWidget(self.bottom)
         vs.setSizes([560, 260])
         root.addWidget(vs, 1)
@@ -145,6 +148,11 @@ class ControlsWindow(QMainWindow):
         self.lights.device_clicked.connect(self.table.select_device)
         self.devedit.message.connect(self._msg)
         self.devedit.saved.connect(self._offer_restart)
+        self.chanedit.message.connect(self._msg)
+        self.chanedit.saved.connect(self._offer_restart)
+        # both edit machine.toml: after one saves, the other re-reads (unless it has unsaved edits)
+        self.devedit.saved.connect(lambda: self.chanedit.is_dirty() or self.chanedit.refresh())
+        self.chanedit.saved.connect(lambda: self.devedit.is_dirty() or self.devedit.refresh())
         for w in (self.panel, self.users, self.cfg):
             w.message.connect(self._msg)
         self.proc.output.connect(self._svc_line)
@@ -455,6 +463,8 @@ class ControlsWindow(QMainWindow):
             self.users.refresh()
         elif w is self.devedit and not self.devedit.is_dirty():
             self.devedit.refresh()
+        elif w is self.chanedit and not self.chanedit.is_dirty():
+            self.chanedit.refresh()
         elif w is self.cfg:
             self.cfg.refresh()
 

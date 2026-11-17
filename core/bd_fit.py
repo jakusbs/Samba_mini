@@ -96,7 +96,13 @@ def load_dc_time(path: str) -> Tuple[np.ndarray, np.ndarray]:
         data = f.get("data")
         if data is None:
             raise ValueError("no /data group — not a Samba scan file")
-        dc_name = next((n for n in DC_NAMES if n in data), None)
+        # Samba_mini saves channels under the names given in Samba_controls, with the channel id as
+        # an attribute: the balanced diodes are found by that id first (a name such as "DC" may be
+        # another channel), then by the names Samba / earlier Samba_mini used.
+        dc_name = next((n for n in data if hasattr(data[n], "attrs")
+                        and str(data[n].attrs.get("channel", "")) == "dc_signal"), None)
+        if dc_name is None:
+            dc_name = next((n for n in DC_NAMES if n in data), None)
         if dc_name is None:
             raise ValueError("no DC channel in this file "
                              f"(has: {', '.join(sorted(data.keys()))})")

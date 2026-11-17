@@ -26,10 +26,13 @@ from PyQt6.QtWidgets import (QCheckBox, QFormLayout, QHBoxLayout, QInputDialog, 
                              QWidget)
 
 from core.config import machine
+from core.scan import channels as _channels
 from core.gui.bridge import error_text
 from core.protocol import ServiceError
 
 FIRST = ("label", "enabled", "start_order")
+#: Edited in the Channels tab (names and physical lines), not here.
+HIDDEN = {"channels"} | {c.wiring for c in _channels.ALL if c.wiring}
 HELP = {
     "label": "Display name shown in Samba_controls; measurements keep using the device id",
     "enabled": "Disabled instruments are not connected at start",
@@ -200,9 +203,13 @@ class DeviceEditor(QWidget):
         title = QLabel(f"<b>{data.get('label') or dev}</b> — device id <code>{dev}</code>")
         title.setTextFormat(Qt.TextFormat.RichText)
         form.addRow(title)
-        keys = [k for k in FIRST if k in data] + [k for k in data if k not in FIRST]
+        keys = [k for k in FIRST if k in data] + [k for k in data if k not in FIRST and k not in HIDDEN]
         for key in keys:
             form.addRow(key, self._field(sec, key, data[key]))
+        if any(k in data for k in HIDDEN):
+            ch_note = QLabel("Channel names and their physical lines: Channels tab.")
+            ch_note.setStyleSheet("color:#89b4fa;font-size:10px;")
+            form.addRow(ch_note)
         self.fields_note = QLabel("Settings apply after the device service restarts.")
         self.fields_note.setStyleSheet("color:#6c7086;font-size:10px;")
         form.addRow(self.fields_note)

@@ -29,10 +29,13 @@ from typing import Any
 import tomli_w
 
 from core import paths
+from core.scan import channels as _channels
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+_CHANNEL_NAMES = _channels.default_names()
 
 DEFAULTS: dict[str, Any] = {
     "schema_version": SCHEMA_VERSION,
@@ -56,6 +59,8 @@ DEFAULTS: dict[str, Any] = {
         "ai_intensity": "Dev1/ai1",
         "trigger_terminal": "/Dev1/PFI0",
         "sampling_rate_Hz": 50000.0,
+        # channel id = the name it is shown and saved under (Samba_controls -> Channels)
+        "channels": dict(_CHANNEL_NAMES["daq"]),
     },
     "coil": {
         "min_V": -6.0,                 # MiniMoke parameter limits (labelled 'A' there)
@@ -75,6 +80,7 @@ DEFAULTS: dict[str, Any] = {
         "reconnect_attempts": 6,
         "allow_usb_reset": False,
         "max_oscillator_V": 5.0,
+        "channels": dict(_CHANNEL_NAMES["lockin"]),
     },
     "hall": {
         "enabled": True,
@@ -83,6 +89,7 @@ DEFAULTS: dict[str, Any] = {
         "dll_path": "",
         "speed": 1,
         "default_integration_s": 0.5,
+        "channels": dict(_CHANNEL_NAMES["hall"]),
     },
     "stages": {
         "longitudinal": {
@@ -209,6 +216,7 @@ def validate(cfg: dict) -> list[str]:
     rate = cfg["daq"].get("sampling_rate_Hz")
     if not isinstance(rate, (int, float)) or rate <= 0:
         problems.append("daq.sampling_rate_Hz must be positive")
+    problems += _channels.validate_names(cfg)
     for dev, sec in device_sections(cfg).items():
         label = sec.get("label")
         if label is not None and (not isinstance(label, str) or not label.strip() or len(label) > LABEL_MAX):

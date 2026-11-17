@@ -39,7 +39,8 @@ import numpy as np
 from core.client import OperationHandle, ServiceClient
 from core.protocol import ErrorCode, ServiceError, new_id
 from core.scan import plans
-from core.scan.channels import BOOKKEEPING, Channel, sensors_for
+from core.scan.channels import (AVERAGED, BOOKKEEPING, RESERVED, RESERVED_PREFIXES, Channel, dataset_key,
+                                sensors_for)
 from core.scan.workflows import WORKFLOWS, Workflow
 from core.storage.hdf5_writer import DatasetSpec, ScanWriter, StorageError, make_filename
 from core.version import describe, software_revision
@@ -86,6 +87,11 @@ class RunRequest:
     #: version, setup, sample, creator, mode, source, ...) -> /metadata bd_calibration_*; the
     #: live display uses the same snapshot.  None = no calibration active.
     bd_calibration_record: dict | None = None
+    #: The sensors to measure and save, as Samba's sensor list: ``[{"id": "dc_signal", "name": "BD",
+    #: "y_axis": "Y1", ...}]``.  Each is saved under its name (``/data/<name>``) with its id as an
+    #: attribute; the Hall probe and the lock-in are read only when one of their channels is in it.
+    #: None (scripts, tests): every sensor of the workflow under its id (the earlier layout).
+    channels: list | None = None
 
 
 @dataclass
@@ -122,6 +128,50 @@ class ScanEngine:
         self._t_start = 0.0
         self._last_xy_um: tuple[float, float] = (math.nan, math.nan)
         self.mode = "unknown"
+        self._resolve_channels()
+
+    # ================================================================ channels
+    def _resolve_channels(self) -> None:
+        """The sensors this run records: ``self.sel`` = [{ch, ds (dataset name), label, unit, ...}],
+        plus whether the Hall probe and the lock-in are read at all."""
+        avail = {c.name: c for c in sensors_for(self.wf.uses_lockin)}
+        self.sel: list[dict] = []
+        self.skipped_channels: list[str] = []
+        if self.req.channels is None:
+            for c in avail.values():
+                self.sel.append({"ch": c, "ds": c.name, "label": c.label, "unit": c.unit, "spec": {}})
+            self.read_hall = bool(self.params.get("record_hall", True))
+            self.read_lockin = self.wf.uses_lockin
+            return
+        used: set[str] = set()
+        for spec in self.req.channels:
+            spec = dict(spec or {})
+            c = avail.get(spec.get("id"))
+            if c is None:
+                self.skipped_channels.append(str(spec.get("name") or spec.get("id")))
+                continue
+            if any(x["ch"].name == c.name for x in self.sel):
+                continue
+            label = str(spec.get("name") or c.label)
+            base = ds = dataset_key(label)
+            n = 2
+            while ds.lower() in used or ds.lower() in RESERVED or ds.lower().startswith(RESERVED_PREFIXES):
+                ds = f"{base}_{n}"
+                n += 1
+            used.add(ds.lower())
+            self.sel.append({"ch": c, "ds": ds, "label": label, "unit": c.unit, "spec": spec})
+        self.read_hall = any(x["ch"].device == "hall" for x in self.sel)
+        self.read_lockin = self.wf.uses_lockin and any(x["ch"].lockin for x in self.sel)
+
+    def _channel_attrs(self, x: dict) -> dict:
+        spec = x["spec"]
+        return {"channel": x["ch"].name, "device": x["ch"].device, "y_axis": spec.get("y_axis", ""),
+                "line": spec.get("line", "")}
+
+    def channels_record(self) -> list[dict]:
+        return [{"id": x["ch"].name, "name": x["label"], "dataset": x["ds"], "unit": x["unit"],
+                 "device": x["ch"].device, "line": x["spec"].get("line", ""),
+                 "y_axis": x["spec"].get("y_axis", "")} for x in self.sel]
 
     # ================================================================ control
     def start(self) -> None:
@@ -285,6 +335,12 @@ class ScanEngine:
             if not self.client.lease_holder:
                 self.client.acquire_lease()
             required = self.wf.required_devices(self.params, self.req.setup)
+            if not self.read_hall and "hall" in required:
+                required.remove("hall")                # no Hall channel ticked: the probe is not used
+            if not self.sel:
+                raise ServiceError(ErrorCode.INVALID_VALUE, "no channel to measure: tick at least one")
+            if self.skipped_channels:
+                self._log("warning", "not measured by this measurement: " + ", ".join(self.skipped_channels))
             run = self._begin_run(required)
             self.client = self.client.for_run(run["run_id"])
             began = True
@@ -375,11 +431,15 @@ class ScanEngine:
     def _layout(self) -> tuple[tuple, list[DatasetSpec], dict]:
         """Return (main shape, dataset specs, root attrs) for this workflow."""
         p = self.params
-        sens = sensors_for(self.wf.uses_lockin)
         specs: list[DatasetSpec] = []
 
         def add_common(group="data", shape=None):
-            for ch in sens + BOOKKEEPING:
+            for x in self.sel:
+                specs.append(DatasetSpec(x["ds"], "sensor", x["label"], x["unit"], group, "f8", shape,
+                                         attrs=self._channel_attrs(x)))
+            for ch in BOOKKEEPING:
+                if ch.name == "hall_integration" and not self.read_hall:
+                    continue
                 specs.append(DatasetSpec(ch.name, ch.role, ch.label, ch.unit, group, ch.dtype, shape))
             specs.append(DatasetSpec("time", "time", "Time since start", "s", group, "f8", shape))
 
@@ -398,10 +458,10 @@ class ScanEngine:
                       DatasetSpec("actuator_coil", "x", "Coil command", "V", "data/averaged", shape=n),
                       DatasetSpec("branch", "index", "Branch (0 fwd, 1 bwd)", "", "data/averaged", "i8", n),
                       DatasetSpec("n_sweeps", "index", "Sweeps averaged", "", "data/averaged", "i8", n)]
-            for ch in sens:
-                if ch.name in ("dc_signal", "intensity", "hall_field", "lockin_x", "lockin_r"):
-                    specs.append(DatasetSpec(ch.name, "sensor", f"{ch.label} (mean)", ch.unit,
-                                             "data/averaged", shape=n))
+            for x in self.sel:
+                if x["ch"].name in AVERAGED:
+                    specs.append(DatasetSpec(x["ds"], "sensor", f"{x['label']} (mean)", x["unit"],
+                                             "data/averaged", shape=n, attrs=self._channel_attrs(x)))
             root = {"_x_key": "actuator_coil", "_is_2d": False, "_is_time": False, "_n_x": plan.n_total}
             self.points_total = shape[0] * shape[1]
             return shape, specs, root
@@ -507,6 +567,7 @@ class ScanEngine:
             "hostname": socket.gethostname(),
             "service_instance": self.client.instance_id or "",
             "run_id": new_id(),
+            "channels_json": self.channels_record(),
         }
         rec = self.req.bd_calibration_record
         cal_vals = [float(v) for v in (self.req.bd_calibration or [])]
@@ -641,13 +702,21 @@ class ScanEngine:
         except Exception:  # noqa: BLE001
             log.exception("progress callback")
 
-    def _sensor_values(self, rec: dict) -> dict:
-        vals = {}
-        for ch in sensors_for(self.wf.uses_lockin) + BOOKKEEPING:
+    def _sensor_values(self, rec: dict) -> tuple[dict, dict]:
+        """(values by dataset name for the file, values by channel id for the live display)."""
+        by_id = {}
+        for x in self.sel:
+            v = rec.get(x["ch"].key, math.nan)
+            by_id[x["ch"].name] = math.nan if v is None else v
+        vals = {x["ds"]: by_id[x["ch"].name] for x in self.sel}
+        for ch in BOOKKEEPING:
+            if ch.name == "hall_integration" and not self.read_hall:
+                continue
             v = rec.get(ch.key, math.nan)
             vals[ch.name] = math.nan if v is None else v
-        vals["time"] = rec.get("t_trigger", math.nan) - self._t_start if rec.get("t_trigger") else math.nan
-        return vals
+        t = rec.get("t_trigger", math.nan) - self._t_start if rec.get("t_trigger") else math.nan
+        vals["time"] = by_id["time"] = t
+        return vals, by_id
 
     # ================================================================ operations
     def _consume(self, op: OperationHandle, on_record: Callable[[dict], None]) -> dict:
@@ -717,7 +786,8 @@ class ScanEngine:
                                   acq_time_s=plan.acq_time_s, hall_live=plan.hall_live,
                                   actual_step_V=plan.actual_step, n_forward=len(plan.forward),
                                   n_backward=len(plan.backward))
-        if plan.hall_live:
+        hall = plan.hall_live and self.read_hall
+        if hall:
             self._prepare_hall(plan.hall_integration_s)
         self._initial_field(p["b_min"])
         x_um, y_um = math.nan, math.nan
@@ -726,8 +796,9 @@ class ScanEngine:
         self._writer.set_metadata(position_x_um=x_um, position_y_um=y_um)
 
         n = plan.n_total
-        sums = {k: np.zeros(n) for k in ("dc_signal", "intensity", "hall_field", "lockin_x", "lockin_r",
-                                          "actuator_coil")}
+        avg_ids = [x["ch"].name for x in self.sel if x["ch"].name in AVERAGED]
+        ds_of = {x["ch"].name: x["ds"] for x in self.sel}
+        sums = {k: np.zeros(n) for k in avg_ids + ["actuator_coil"]}
         counts = {k: np.zeros(n) for k in sums}
         completed = 0
         for s in range(n_sweeps):
@@ -736,21 +807,22 @@ class ScanEngine:
             op = self._rpc(lambda: self._dev("moke").start_operation(
                 "field_sweep", setpoints_V=[float(v) for v in plan.setpoints],
                 branch=[int(b) for b in plan.branch], t_point_s=plan.t_point_s, settle_s=plan.settle_s,
-                acq_time_s=plan.acq_time_s, hall=plan.hall_live, lockin=lockin), "start sweep")
+                acq_time_s=plan.acq_time_s, hall=hall, lockin=lockin and self.read_lockin), "start sweep")
             sweep_vals: dict[str, np.ndarray] = {k: np.full(n, np.nan) for k in sums}
 
             def on_record(rec, s=s, sweep_vals=sweep_vals):
                 i = int(rec["index"])
-                vals = self._sensor_values(rec)
+                vals, by_id = self._sensor_values(rec)
                 vals.update({"actuator_coil_setpoint": rec["setpoint_V"], "actuator_coil": rec["coil_V"],
                              "cycle": s, "branch": rec["branch"]})
+                by_id["actuator_coil"] = rec["coil_V"]
                 self._write((s, i), vals)
                 for k in sums:
-                    sweep_vals[k][i] = vals.get(k, np.nan)
+                    sweep_vals[k][i] = by_id.get(k, np.nan)
                 self.points_done += 1
                 self._emit({"kind": "point", "workflow": self.wf.key, "sweep": s, "index": i,
                             "flat_index": s * n + i, "branch": rec["branch"], "x": rec["coil_V"],
-                            "values": vals, "record": rec})
+                            "values": by_id, "record": rec})
 
             self._consume(op, on_record)
             for k in sums:
@@ -763,9 +835,10 @@ class ScanEngine:
         avg = {k: np.where(counts[k] > 0, sums[k] / np.maximum(counts[k], 1), np.nan) for k in sums}
         for i in range(n):
             vals = {"actuator_coil_setpoint": float(plan.setpoints[i]), "actuator_coil": avg["actuator_coil"][i],
-                    "branch": int(plan.branch[i]), "n_sweeps": int(counts["dc_signal"][i])}
-            for k in ("dc_signal", "intensity", "hall_field", "lockin_x", "lockin_r"):
-                vals[k] = avg[k][i]
+                    "branch": int(plan.branch[i]),
+                    "n_sweeps": int(counts[avg_ids[0] if avg_ids else "actuator_coil"][i])}
+            for k in avg_ids:
+                vals[ds_of[k]] = avg[k][i]
             self._write((i,), vals, "data/averaged", count=False)
         self._emit({"kind": "average", "workflow": self.wf.key, "x": plan.setpoints.tolist(),
                     "values": {k: v.tolist() for k, v in avg.items()}, "branch": plan.branch.tolist()})
@@ -779,7 +852,7 @@ class ScanEngine:
         else:
             pts, values = self._position_points()
         self._writer.set_metadata(field_settle_s=p["field_settle_s"])
-        record_hall = bool(p["record_hall"])
+        record_hall = self.read_hall
         if record_hall:
             self._prepare_hall(plans.hall_integration_for(p["acq_time"]))
         self._initial_field(p["b"])
@@ -811,7 +884,8 @@ class ScanEngine:
                 token = f"{k}"
                 rec = self._rpc(lambda: self._dev("moke").command(
                     "measure_point", coil_V=pt.coil_V, acq_time_s=p["acq_time"], settle_s=settle,
-                    hall=record_hall, lockin=True, lockin_after="acquisition", token=token), "measure")
+                    hall=record_hall, lockin=self.read_lockin, lockin_after="acquisition", token=token),
+                    "measure")
                 if rec.get("token") != token:
                     raise ServiceError(ErrorCode.INTERNAL, "stale point rejected (token mismatch)")
                 last_coil = pt.coil_V
@@ -826,7 +900,7 @@ class ScanEngine:
                 self._auto_pause(f"Hardware error at point {k + 1}/{len(pts)}: {exc.message} - PAUSED. "
                                  "Fix the cause, then Resume to retry this point, or Abort.")
                 continue
-            vals = self._sensor_values(rec)
+            vals, by_id = self._sensor_values(rec)
             vals["coil_setpoint"] = pt.coil_V
             if self.wf.key == "xy_sweep":
                 group = "data" if pt.rep == 0 else f"data/repeat_{pt.rep + 1:03d}"
@@ -846,14 +920,14 @@ class ScanEngine:
             self.points_done += 1
             self._emit({"kind": "point", "workflow": self.wf.key, "index": k, "ix": pt.ix, "iy": pt.iy,
                         "rep": pt.rep, "loop": pt.loop, "x": read_x if self.wf.key != "y_sweep" else read_y,
-                        "x_um": read_x, "y_um": read_y, "coil_V": pt.coil_V, "values": vals, "record": rec,
+                        "x_um": read_x, "y_um": read_y, "coil_V": pt.coil_V, "values": by_id, "record": rec,
                         "n_cols": n_cols})
             k += 1
 
     def _run_time(self) -> None:
         p = self.params
         n = plans.time_points(p["duration"], p["interval"])
-        record_hall = bool(p["record_hall"])
+        record_hall = self.read_hall
         if record_hall:
             self._prepare_hall(plans.hall_integration_for(p["acq_time"]))
         self._initial_field(p["b"])
@@ -864,17 +938,17 @@ class ScanEngine:
         self._writer.set_metadata(position_x_um=x_um, position_y_um=y_um)
         op = self._rpc(lambda: self._dev("moke").start_operation(
             "time_trace", coil_V=p["b"], n_points=n, interval_s=p["interval"], acq_time_s=p["acq_time"],
-            hall=record_hall, lockin=True), "start time trace")
+            hall=record_hall, lockin=self.read_lockin), "start time trace")
 
         def on_record(rec):
             k = int(rec["index"])
-            vals = self._sensor_values(rec)
-            vals["time"] = rec["elapsed_s"]
+            vals, by_id = self._sensor_values(rec)
+            vals["time"] = by_id["time"] = rec["elapsed_s"]
             vals["coil_setpoint"] = p["b"]
             self._write((k,), vals)
             self.points_done += 1
             self._emit({"kind": "point", "workflow": self.wf.key, "index": k, "x": rec["elapsed_s"],
-                        "values": vals, "record": rec})
+                        "values": by_id, "record": rec})
             if k % 10 == 9:
                 self._writer.checkpoint()
         self._consume(op, on_record)
