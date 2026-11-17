@@ -33,6 +33,7 @@ from core import paths
 from core.data_browser import DataBrowserPanel
 from core.gui.bridge import EngineBridge, ServiceBridge, error_text
 from core.gui.login import LoginDialog
+from core.gui.outputs import ask_keep_outputs
 from core.plot_config import X_NATURAL, X_TIME
 from core.plot_widgets import Live1DWidget, Live2DWidget
 from core.kerr import KerrDisplayState
@@ -300,7 +301,7 @@ class MainWindow(QMainWindow):
                 row.addWidget(sep)
         row.addStretch(1)
         sb.addWidget(container, 1)
-        for key in ("Saved", "Mode", "User"):
+        for key in ("Coil", "Saved", "Mode", "User"):
             lbl = QLabel(f"{key}: —")
             lbl.setStyleSheet("color:#a6adc8;font-size:12px;padding:0 6px;")
             sb.addPermanentWidget(lbl)
@@ -392,6 +393,25 @@ class MainWindow(QMainWindow):
             self.dir_edit.blockSignals(True)
             self.dir_edit.setText(str(value or "") or str(paths.default_measurement_dir()))
             self.dir_edit.blockSignals(False)
+
+    def _show_coil(self, value) -> None:
+        """The coil keeps running between measurements: say so where it is always visible."""
+        lbl = self.sb["Coil"]
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            v = math.nan
+        if not math.isfinite(v):
+            lbl.setText("Coil: —")
+            lbl.setStyleSheet("color:#a6adc8;font-size:12px;padding:0 6px;")
+        elif abs(v) > 1e-6:
+            lbl.setText(f"Coil: {v:+.4g} V ON")
+            lbl.setStyleSheet("color:#fab387;font-size:12px;font-weight:bold;padding:0 6px;")
+            lbl.setToolTip("The coil command is on; it keeps running between measurements. "
+                           "Zero outputs (Hardware box) switches it off.")
+        else:
+            lbl.setText("Coil: 0 V")
+            lbl.setStyleSheet("color:#a6adc8;font-size:12px;padding:0 6px;")
 
     def _show_save_state(self, state: str, text: str) -> None:
         shown = {"offline": ("—", "#6c7086", "Not logged in: nothing is saved"),
@@ -675,9 +695,12 @@ class MainWindow(QMainWindow):
                 "them?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
+        keep = ask_keep_outputs(self, c) if c.lease_holder else []
+        if keep is None:
+            return
         try:
             if c.lease_holder:
-                c.release_lease()
+                c.release_lease(keep_outputs=keep)
             c.logout()
         except ServiceError as exc:
             QMessageBox.warning(self, "Log out", error_text(exc))
@@ -729,6 +752,8 @@ class MainWindow(QMainWindow):
             dev, attr, q = body.get("device"), body.get("attr"), body.get("quality", "")
             hw = self.trajectory.hardware
             hw.set_readout(dev, attr, body.get("value"), q)
+            if dev == "daq" and attr == "coil_command_V":
+                self._show_coil(body.get("value"))
             if dev == "hall" and attr == "field_mT":
                 self.trajectory.add_field_reading(body.get("value"))
             if dev == f"stage_{self.setup}" and attr in ("x_mm", "y_mm", "z_mm"):
@@ -756,8 +781,12 @@ class MainWindow(QMainWindow):
                 if self.running:
                     QMessageBox.warning(self, "Measurement running", "Stop the measurement first.")
                     return
-                c.release_lease()
-                self._log("info", "Released control of the setup.")
+                keep = ask_keep_outputs(self, c)
+                if keep is None:
+                    return
+                c.release_lease(keep_outputs=keep)
+                self._log("info", "Released control of the setup."
+                          + (f" Left running: {', '.join(keep)}." if keep else ""))
             else:
                 c.acquire_lease()
                 self._log("info", "You control the setup.")
@@ -1046,11 +1075,37 @@ class MainWindow(QMainWindow):
     def _confirm_real(self, wf, params: dict, what: str) -> bool:
         if (self.bridge.hello_info or {}).get("mode") != "real":
             return True
-        moves = wf.uses_stage == "required" or params.get("position_stage")
-        text = (f"Start {what} on the REAL setup?\n\nThe coil command will be set"
-                + (", the lock-in oscillator switched on" if wf.uses_lockin else "")
-                + (" and the stage moved" if moves else "") + ".")
+        text = f"Start {what} on the REAL setup?\n\n" + self.start_summary(wf, params)
         return QMessageBox.question(self, "Real hardware", text) == QMessageBox.StandardButton.Yes
+
+    def start_summary(self, wf, params: dict, channels: list | None = None) -> str:
+        """What a run will do to the instruments -- exactly, nothing it will not do."""
+        keep = True
+        c = self._client()
+        if c.has_feature("coil-keep-1"):
+            try:
+                snap = c.call("config.get", {}, 5.0).get("data") or {}
+                keep = (snap.get("cleanup") or {}).get("coil_after_run", "keep") == "keep"
+            except ServiceError:
+                pass
+        else:
+            keep = False
+        chans = channels if channels is not None else self.right.selected_for(wf.key)
+        lines = []
+        if wf.key in ("b_sweep_dc", "b_sweep_lockin"):
+            lines.append(f"• The coil is swept between {params['b_min']:+.4g} V and {params['b_max']:+.4g} V"
+                         + ("; afterwards it returns to its present value." if keep else "; afterwards 0 V."))
+        else:
+            b = float(params.get("b", 0.0))
+            flip = wf.key in ("x_sweep", "y_sweep") and b != 0.0
+            lines.append(f"• The coil command is set to {b:+.4g} V" + (f" ({-b:+.4g} V for the reversed-field "
+                         "line)" if flip else "") + (f"; it stays at {b:+.4g} V afterwards." if keep
+                                                       else "; afterwards 0 V."))
+        if wf.uses_lockin and any(ch.get("device") == "lockin" for ch in chans):
+            lines.append("• The lock-in is read as it is set now; the measurement does not change it.")
+        if wf.uses_stage == "required" or params.get("position_stage"):
+            lines.append("• The stage moves.")
+        return "\n".join(lines)
 
     def _take_control(self) -> bool:
         c = self._client()
@@ -1624,11 +1679,15 @@ class MainWindow(QMainWindow):
                     QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 ev.ignore()
                 return
+        keep = ask_keep_outputs(self, c) if c.session and c.lease_holder else []
+        if keep is None:
+            ev.ignore()
+            return
         QSettings("ETH-Intermag", "SambaMini").setValue("geometry", self.saveGeometry())
         try:
             if c.session:
                 if c.lease_holder:
-                    c.release_lease()
+                    c.release_lease(keep_outputs=keep)
                 c.logout()
         except ServiceError:
             pass

@@ -118,9 +118,16 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "cleanup": {
+        # When nobody controls the setup any more -- the controlling program is lost (lease
+        # expiry), an administrator forces control away, the service stops -- and when the holder
+        # releases control without choosing to leave them on:
         "zero_coil": True,
         "lockin_output_off": True,
         "stop_stages": True,
+        # After a measurement: "keep" leaves the coil running (a field sweep returns to the value it
+        # started from, other measurements keep their coil command); "zero" sets 0 V (MiniMoke).
+        # Measurements never change the lock-in, so they never switch it off either.
+        "coil_after_run": "keep",
     },
 }
 
@@ -217,6 +224,8 @@ def validate(cfg: dict) -> list[str]:
     if not isinstance(rate, (int, float)) or rate <= 0:
         problems.append("daq.sampling_rate_Hz must be positive")
     problems += _channels.validate_names(cfg)
+    if (cfg.get("cleanup") or {}).get("coil_after_run", "keep") not in ("keep", "zero"):
+        problems.append("cleanup.coil_after_run must be 'keep' or 'zero'")
     for dev, sec in device_sections(cfg).items():
         label = sec.get("label")
         if label is not None and (not isinstance(label, str) or not label.strip() or len(label) > LABEL_MAX):

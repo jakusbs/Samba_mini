@@ -3,11 +3,12 @@
 Samba shows Lock-in / Current Source / Field & Relay; MiniMoke has no Keithley
 or relay, so the boxes are Lock-in (7270) / Field / Detectors.
 
-The lock-in values and the coil command are the settings of the measurement
-(saved with the configuration and applied by the engine at run start, as
-MiniMoke did); the buttons act on the instruments immediately and need control
-of the setup (the service refuses them otherwise).  Readbacks come from the
-service's readback events.
+The lock-in is set only here, with "Apply now": measurements read it as it is
+set and never change it.  The coil command is the field of spatial and time
+scans (applied at their start) and keeps running between measurements; "Set"
+applies it now and "Zero outputs" switches it off.  The buttons act on the
+instruments immediately and need control of the setup (the service refuses
+them otherwise).  Readbacks come from the service's readback events.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ class HardwareGroup(QGroupBox):
 
         # ---------------------------------------------------------- lock-in
         self.li_box = QGroupBox("Lock-in (7270)")
-        self.li_box.setToolTip("Ametek 7270: the settings of this measurement, applied at run start")
+        self.li_box.setToolTip("Ametek 7270: Apply now sends these settings. Measurements never change the "
+                               "lock-in; they read it as it is set.")
         lg = QGridLayout(self.li_box)
         lg.setSpacing(3)
         self.li: dict[str, NoScrollDoubleSpinBox] = {}
@@ -70,7 +72,8 @@ class HardwareGroup(QGroupBox):
         self.li["volt"].setToolTip("Oscillator amplitude (OA.): drives the sample current through the "
                                    "external source")
         b_apply = QPushButton("Apply now")
-        b_apply.setToolTip("Send these settings to the 7270 now (REFMODE 0). Runs apply them anyway.")
+        b_apply.setToolTip("Send these settings to the 7270 now (REFMODE 0). This is the only way the "
+                           "lock-in is changed: measurements do not configure it.")
         b_apply.clicked.connect(self._lockin_apply)
         b_off = QPushButton("Osc. off")
         b_off.clicked.connect(lambda: self._cmd("lockin", "output_off"))

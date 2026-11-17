@@ -266,8 +266,13 @@ class ServiceClient:
         self.lease_holder = True
         return st
 
-    def release_lease(self, force: bool = False) -> dict:
-        st = self.call("lease.release", {"force": force}, 120.0)
+    def release_lease(self, force: bool = False, keep_outputs: list[str] | None = None) -> dict:
+        """Release control; ``keep_outputs`` ("coil", "lockin") stay running instead of being
+        switched off by the cleanup."""
+        params: dict = {"force": force}
+        if keep_outputs:
+            params["keep_outputs"] = list(keep_outputs)
+        st = self.call("lease.release", params, 120.0)
         self.lease_holder = False
         return st
 

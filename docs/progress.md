@@ -157,13 +157,23 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   their names with the id as an attribute (as Samba); the std values are gone;
   the "Record Hall" box is replaced by ticking the Hall channel.  Simulation only.
 
+* 2026-11-17 — **Lock-in by hand only, coil keeps running** (branch
+  `feature/manual-lockin-coil-keep`, from `main` at `5fa260e`).  Measurements
+  never configure or switch off the lock-in; they read and record its settings
+  (the lock-in B-sweep settles for its real time constant).  The coil keeps
+  running after measurements (field sweeps return to the start value;
+  `cleanup.coil_after_run`).  Releasing control or closing with the coil /
+  oscillator on asks whether to leave them on; lost control and service stop
+  still switch them off.  The start message lists only what a run does; the
+  status bar shows the coil.  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **136 passed** (≈150 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **140 passed** (≈170 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
 engine 13, drivers 14, core 16, recovery 4, process 2, GUI 16, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 15,
-device settings and lights 6, user folders 2, channels 6.
+device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4.
 See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,

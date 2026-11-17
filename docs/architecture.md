@@ -265,11 +265,22 @@ the owners' workers).  Logical devices never open hardware themselves.
   unchanged (MiniMoke behaviour); pacing resumes from the pause.
 * **Abort** stops at the next point boundary (moves are stopped with the
   controller's stop command), then runs cleanup; no move back to the start.
-* **Cleanup** (end, abort, failure, lease loss): coil command → 0 V and DAQ
-  tasks stopped; lock-in oscillator amplitude → 0 V (`OA. 0`, as MiniMoke);
-  stages stopped where they are.  Instant zeroing of the coil command is what
-  MiniMoke has always done; an optional `coil.ramp_rate_V_per_s` exists but is
-  off by default until verified on the rig.
+* **Lock-in:** measurements never configure it -- only "Apply now" (Hardware
+  box) or Samba_controls does; a run reads its settings before it starts (the
+  lock-in B-sweep settles for the lock-in's real time constant), records them
+  (`lockin_settings_json`) and warns when they differ from the Hardware box.
+* **Coil after a run** (`cleanup.coil_after_run`, default `keep`): the coil
+  keeps running -- a field sweep returns to the value it started from, other
+  measurements keep their coil command; `zero` restores MiniMoke's 0 V.
+* **Cleanup at run end** (end, abort, failure): DAQ tasks stopped, stages
+  stopped where they are; the coil as above; the lock-in is never switched off
+  (runs do not drive it).
+* **When control ends:** releasing it, the holder chooses whether a running
+  coil / lock-in oscillator stays on (Samba_mini and Samba_controls ask);
+  otherwise -- and always when the client is lost (lease expiry), on a forced
+  release and when the service stops -- coil → 0 V, `OA. 0`, stages stopped.
+  Zeroing is instant (as MiniMoke); an optional `coil.ramp_rate_V_per_s` exists
+  but is off by default until verified on the rig.
 * **Backend failure / lost client:** the client marks the file `interrupted`
   and reports that the hardware state could not be verified; the backend's
   lease watchdog performs cleanup when a client disappears.

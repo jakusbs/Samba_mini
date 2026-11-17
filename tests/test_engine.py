@@ -64,6 +64,10 @@ def test_b_sweep_lockin_reads_current_point(admin_client, tmp_path):
     # Lock-in X must follow the field at the *same* point (finding F1).
     params = dict(b_min=-0.6, b_max=0.6, b_step=0.3, sweep_freq=10.0, num_sweeps=1, x=0.0, y=0.0,
                   position_stage=False, **dict(FAST_LOCKIN, time_const=0.001))
+    # Measurements never configure the lock-in: set it by hand first (Hardware box "Apply now").
+    admin_client.acquire_lease()
+    admin_client.device("lockin").command("configure", volt=1.0, sensi=1e-3, freq=1777.0, time_const=0.001,
+                                          phase=0.0)
     eng, states, points = run_engine(admin_client, "b_sweep_lockin", params, tmp_path)
     res = eng.run()
     assert res["status"] == "completed", res

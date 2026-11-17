@@ -12,6 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("SAMBA_MINI_FAST_HASH", "1")
+# Releasing control with the coil on asks whether to keep it: tests answer "no" (switch it off).
+os.environ.setdefault("SAMBA_MINI_KEEP_OUTPUTS", "no")
 # Per-user data folders are created at login: never in the real Documents folder during tests.
 import tempfile  # noqa: E402
 

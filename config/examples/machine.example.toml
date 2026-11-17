@@ -98,7 +98,9 @@ mm2steps_y = 51200.0
 mm2steps_z = 51200.0
 move_timeout_s = 120.0
 
-[cleanup]                    # what runs at the end of a run, on abort, and when control is lost
+[cleanup]                    # when control is lost (client gone, forced release), at service stop,
+                             # and on release unless the holder chose to leave the outputs on
 zero_coil = true             # coil command -> 0 V (MiniMoke did this instantly)
-lockin_output_off = true     # OA. 0 (MiniMoke meas.shutdown())
+lockin_output_off = true     # OA. 0 (MiniMoke meas.shutdown()); measurements never switch it off
 stop_stages = true
+coil_after_run = "keep"      # "keep": the coil keeps running after measurements; "zero": 0 V (MiniMoke)

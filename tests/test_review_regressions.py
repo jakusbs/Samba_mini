@@ -244,30 +244,37 @@ def test_engine_drains_all_pages_before_handling_final_state(admin_client, servi
     assert [r["seq"] for r in records] == list(range(1, 4502))
 
 
-def test_lockin_settle_uses_applied_time_constant(admin_client, service, tmp_path, monkeypatch):
-    requested = 0.11  # the simulated 7270, like the real driver, rounds this to 0.2 s
+def test_lockin_settle_uses_the_lockins_own_time_constant(admin_client, service, tmp_path, monkeypatch):
+    """Runs never configure the lock-in (only "Apply now" does): a lock-in B-sweep reads the time
+    constant the lock-in is actually set to and settles for that, whatever the Hardware box says."""
+    admin_client.acquire_lease()
+    admin_client.device("lockin").command("configure", volt=0.0, sensi=1e-3, freq=1777.0, time_const=0.11,
+                                          phase=0.0)      # by hand; the simulated 7270 rounds 0.11 s to 0.2 s
+    admin_client.release_lease()
     params = dict(b_min=0.0, b_max=0.1, b_step=0.1, sweep_freq=10.0,
                   num_sweeps=1, x=0.0, y=0.0, position_stage=False,
-                  **dict(FAST_LOCKIN, time_const=requested))
+                  **dict(FAST_LOCKIN, time_const=0.5))      # the Hardware box shows something else
     moke = service.server.host.device("moke")
-    actual = moke.op_field_sweep
-    used = []
-
-    def capture(ctx, **kwargs):
-        used.append(dict(kwargs))
-        return actual(ctx, **kwargs)
-
-    monkeypatch.setattr(moke, "op_field_sweep", capture)
-    engine, _, _ = run_engine(admin_client, "b_sweep_lockin", params, tmp_path)
-    result = engine.run()
+    lockin = service.server.host.device("lockin")
+    actual_sweep, actual_configure = moke.op_field_sweep, lockin.cmd_configure
+    used, configured = [], []
+    monkeypatch.setattr(moke, "op_field_sweep", lambda ctx, **kw: (used.append(dict(kw)),
+                                                                   actual_sweep(ctx, **kw))[1])
+    monkeypatch.setattr(lockin, "cmd_configure", lambda ctx, **kw: (configured.append(kw),
+                                                                    actual_configure(ctx, **kw))[1])
+    logs = []
+    req = RunRequest("b_sweep_lockin", params, setup="longitudinal", sample="S1", operator="op",
+                     save_dir=str(tmp_path / "data"), config_name="cfg", lab_notebook=str(tmp_path / "nb.csv"))
+    result = ScanEngine(admin_client, req, Callbacks(log=lambda level, msg: logs.append(msg))).run()
     assert result["status"] == "completed", result
-    data = read_file(result["path"])
-    meta = data["metadata"]
-    assert json.loads(meta["params_json"])["time_const"] == requested
-    assert json.loads(meta["lockin_applied_json"])["time_constant_s"] == pytest.approx(0.2)
+    assert configured == []                                     # the run did not touch the lock-in
+    meta = read_file(result["path"])["metadata"]
+    assert json.loads(meta["params_json"])["time_const"] == 0.5
+    assert json.loads(meta["lockin_settings_json"])["time_constant_s"] == pytest.approx(0.2)
     assert meta["field_settle_s"] == pytest.approx(1.0)
     assert used[0]["settle_s"] == pytest.approx(1.0)
     assert used[0]["t_point_s"] >= 1.0 + FAST_LOCKIN["acq_time"]
+    assert any("time_constant_s 0.2 (Hardware box 0.5)" in m for m in logs)    # the difference is said
 
 
 def test_old_executor_request_does_not_use_a_reacquired_lease(admin_client, service, monkeypatch):
