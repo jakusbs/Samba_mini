@@ -215,6 +215,17 @@ class ServiceClient:
         self.session = res["session"]
         self.user = res["user"]
         self.session_epoch += 1
+        # The session belongs to the service instance that answered the login -- which need not be
+        # the one of the last hello (both apps started at once: the service restarted in between,
+        # 17 Nov).  An older service does not say: ask it.
+        iid = res.get("instance_id")
+        if not iid:
+            try:
+                iid = self.call("server.hello", {}, 5.0).get("instance_id")
+            except ServiceError:
+                iid = None
+        if iid:
+            self.instance_id = iid
         self.start_heartbeat()
         return res
 
@@ -247,8 +258,11 @@ class ServiceClient:
                     if exc.code == ErrorCode.AUTH_REQUIRED:
                         self.lease_holder = False
                     continue
-                if self.instance_id and res.get("instance_id") != self.instance_id:
-                    self._notify("restarted", res)
+                if res.get("instance_id"):
+                    # The session answered, so it lives on this instance.  A service restart ends
+                    # the session (reported as session_lost); an id differing here only means the
+                    # recorded one was stale -- adopt it instead of reporting a restart every beat.
+                    self.instance_id = res["instance_id"]
                 had = self.lease_holder
                 self.lease_holder = bool(res.get("lease_holder"))
                 if had and not self.lease_holder:

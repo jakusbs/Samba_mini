@@ -13,9 +13,17 @@ Protocol details preserved from MiniMoke (verified on the rig):
 * every *set* command is followed by a read that must return an empty string
   (``check_set_errors``); a non-empty answer means the response stream is
   misaligned;
-* the Ethernet socket interface sends one extra status-prompt chunk per
-  response; it is counted at connect with an ``ID`` probe (after flushing stale
-  responses) and drained after every transaction;
+* the Ethernet socket interface follows every NUL-terminated response with two
+  raw bytes, the status byte and the overload byte.  Without an overload the
+  overload byte is 0 -- the NUL terminator -- so the pair looks like a short
+  chunk; during an overload it is not, and a NUL-terminated read would run on
+  into the next response (seen on the rig: ``'9\x03'`` glued to an XY reply,
+  17 Nov).  The pair is therefore read by count (two bytes), detected at
+  connect with an ``ID`` probe after discarding stale bytes, and an overload
+  is logged;
+* a reply that cannot be read (stream misaligned) re-syncs the stream and is
+  asked again once; if it still cannot be read the call fails without
+  marking the lock-in faulted;
 * on an I/O error: reopen the session, VISA device-clear, re-probe, retry the
   query, up to ``reconnect_attempts`` times with growing waits;
 * a socket resource on port 50000 falls back to 50001 at connect (the 7270
@@ -40,8 +48,8 @@ from Samba_controls.service.devices.lockin import (SENSITIVITIES, TIME_CONSTANTS
 log = logging.getLogger(__name__)
 
 PROTOCOL_PROBE_TIMEOUT_MS = 500
-PROTOCOL_FLUSH_MAX = 32
-PROTOCOL_PROBE_CHUNK_MAX = 4
+DISCARD_MAX_BYTES = 65536         # stale bytes thrown away at most when re-syncing
+STATUS_BYTES = 2                  # status byte + overload byte after every Ethernet reply
 RECONNECT_SETTLE_S = 1.0
 # The Ethernet status chunk follows the reply within milliseconds on the lab
 # network.  Waiting the full read timeout (2 s) for one that never comes was
@@ -70,6 +78,9 @@ class Ametek7270(LockinBase):
         self._extra_chunks = 0
         self._maybe_late = False          # a status chunk may still arrive: flush before the next command
         self.missing_chunks = 0           # replies whose status chunk did not come (diagnostics)
+        self.status_byte: int | None = None
+        self.overload_byte = 0            # last overload byte (0: no overload)
+        self.resyncs = 0                  # unreadable replies that needed a re-sync (diagnostics)
 
     # ------------------------------------------------------------ session
     def _connect(self) -> None:
@@ -113,75 +124,86 @@ class Ametek7270(LockinBase):
     def _disconnect(self) -> None:
         self._close()
 
+    def _discard_pending(self, timeout_ms: int) -> int:
+        """Throw away every byte already waiting (byte by byte: stale data need not end in NUL)."""
+        inst = self._inst
+        old = inst.timeout
+        inst.timeout = timeout_ms
+        n = 0
+        try:
+            while n < DISCARD_MAX_BYTES:
+                try:
+                    n += len(inst.read_bytes(1))
+                except Exception:  # noqa: BLE001 - timeout: nothing more waiting
+                    break
+        finally:
+            inst.timeout = old
+        return n
+
     def _sync_protocol(self) -> None:
+        """Discard stale bytes, then learn the framing with an ``ID`` probe: Ethernet sockets
+        follow every reply with the status and overload bytes, USB does not."""
         inst = self._inst
         old = inst.timeout
         try:
+            flushed = self._discard_pending(PROTOCOL_PROBE_TIMEOUT_MS)
             inst.timeout = PROTOCOL_PROBE_TIMEOUT_MS
-            flushed = 0
-            while flushed < PROTOCOL_FLUSH_MAX:
-                try:
-                    inst.read()
-                    flushed += 1
-                except Exception:  # noqa: BLE001 - timeout: queue empty
-                    break
             inst.write("ID")
-            chunks = 0
-            while chunks < PROTOCOL_PROBE_CHUNK_MAX:
-                try:
-                    inst.read()
-                    chunks += 1
-                except Exception:  # noqa: BLE001 - timeout: no more chunks
-                    break
-            if chunks == 0:
-                raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "no answer to ID probe")
-            self._extra_chunks = max(chunks - 1, 0)
+            try:
+                inst.read()
+            except Exception as exc:  # noqa: BLE001
+                raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, f"no answer to ID probe ({exc})") from exc
+            try:
+                self._note_status(inst.read_bytes(STATUS_BYTES))
+                self._extra_chunks = 1
+            except Exception:  # noqa: BLE001 - nothing follows: USB framing
+                self._extra_chunks = 0
             self._maybe_late = False
             if flushed:
-                log.info("7270: flushed %d stale response(s)", flushed)
+                log.info("7270: discarded %d stale byte(s)", flushed)
             if self._extra_chunks:
-                log.info("7270: %d extra status chunk(s) per response (socket framing)", self._extra_chunks)
+                log.info("7270: 1 extra status chunk(s) per response (socket framing: status + overload byte)")
         finally:
             inst.timeout = old
 
+    def _note_status(self, raw: bytes) -> None:
+        """The status and overload bytes that follow an Ethernet reply."""
+        if len(raw) < STATUS_BYTES:
+            return
+        self.status_byte = raw[0]
+        overload = raw[1]
+        if overload and not self.overload_byte:
+            log.warning("7270 reports an overload (overload byte 0x%02x): the signal is larger than the "
+                        "sensitivity range -- choose a larger sensitivity", overload)
+        elif self.overload_byte and not overload:
+            log.info("7270: overload cleared")
+        self.overload_byte = overload
+
     def _drain(self) -> None:
-        """Read the interface's extra status chunk(s) after a reply, waiting briefly only."""
+        """Read the status and overload bytes after a reply (by count), waiting briefly only."""
         if not self._extra_chunks:
             return
         inst = self._inst
         old = inst.timeout
         inst.timeout = DRAIN_TIMEOUT_MS
         try:
-            for _ in range(self._extra_chunks):
-                try:
-                    inst.read()
-                except Exception:  # noqa: BLE001 - missing chunk: do not wait for it
-                    self.missing_chunks += 1
-                    self._maybe_late = True
-                    n = self.missing_chunks
-                    if n in (1, 10, 100) or n % 1000 == 0:
-                        log.warning("7270: status chunk missing after a reply (%d so far); not waiting "
-                                    "for it", n)
-                    break
+            self._note_status(inst.read_bytes(STATUS_BYTES))
+        except Exception:  # noqa: BLE001 - missing: do not wait for it
+            self.missing_chunks += 1
+            self._maybe_late = True
+            n = self.missing_chunks
+            if n in (1, 10, 100) or n % 1000 == 0:
+                log.warning("7270: status chunk missing after a reply (%d so far); not waiting "
+                            "for it", n)
         finally:
             inst.timeout = old
 
     def _flush_late(self) -> None:
-        """Discard a status chunk that arrived after _drain stopped waiting for it."""
+        """Discard status bytes that arrived after _drain stopped waiting for them."""
         if not self._maybe_late:
             return
         self._maybe_late = False
-        inst = self._inst
-        old = inst.timeout
-        inst.timeout = LATE_FLUSH_TIMEOUT_MS
-        try:
-            for _ in range(PROTOCOL_FLUSH_MAX):
-                try:
-                    inst.read()
-                except Exception:  # noqa: BLE001 - nothing pending
-                    break
-        finally:
-            inst.timeout = old
+        self._discard_pending(LATE_FLUSH_TIMEOUT_MS)
 
     # ------------------------------------------------------------ transactions
     def _ask_once(self, command: str) -> str:
@@ -276,16 +298,40 @@ class Ametek7270(LockinBase):
         return False
 
     # ------------------------------------------------------------ primitives
-    def hw_read_xy(self) -> tuple[float, float]:
-        reply = self.ask("XY.")
-        if reply == "":
-            raise ServiceError(ErrorCode.DEVICE_FAULT,
-                               "7270 returned no XY data (reference mode not single?)")
+    def _query(self, command: str, parse, what: str):
+        """Ask and parse.  An unreadable reply means the response stream is misaligned: re-sync
+        and ask once more; if that fails too, the call fails (``ServiceError``) without marking
+        the lock-in faulted, so a stray byte can never block the cleanup."""
+        reply = self.ask(command)
         try:
-            x_s, y_s = reply.split(",")[:2]
-            return float(x_s), float(y_s)
-        except ValueError as exc:
-            raise ServiceError(ErrorCode.DEVICE_FAULT, f"7270: cannot parse XY reply {reply!r}") from exc
+            return parse(reply)
+        except (ValueError, IndexError, TypeError):
+            self.resyncs += 1
+            log.warning("7270: unreadable reply %r to %r (response stream misaligned); resyncing", reply, command)
+            try:
+                self._sync_protocol()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("7270 resync failed: %s", exc)
+        reply = self.ask(command)
+        try:
+            return parse(reply)
+        except (ValueError, IndexError, TypeError) as exc:
+            raise ServiceError(ErrorCode.DEVICE_FAULT, f"7270: cannot read {what} (reply {reply!r})",
+                               {"device": self.name}) from exc
+
+    @staticmethod
+    def _parse_xy(reply: str) -> tuple[float, float]:
+        x_s, y_s = reply.split(",")[:2]           # "" or one value: ValueError
+        return float(x_s), float(y_s)
+
+    def hw_read_xy(self) -> tuple[float, float]:
+        try:
+            return self._query("XY.", self._parse_xy, "XY")
+        except ServiceError as exc:
+            if "reply ''" in exc.message:
+                raise ServiceError(ErrorCode.DEVICE_FAULT,
+                                   "7270 returned no XY data (reference mode not single?)") from exc
+            raise
 
     def hw_reference_mode(self, mode: int) -> None:
         if mode not in (0, 1, 2):
@@ -318,17 +364,17 @@ class Ametek7270(LockinBase):
 
     def hw_get(self, what: str):
         if what == "oscillator_V":
-            return float(self.ask("OA."))
+            return self._query("OA.", float, what)
         if what == "sensitivity_V":
-            return SENSITIVITIES[int(self.ask("SEN"))]
+            return self._query("SEN", lambda r: SENSITIVITIES[int(r)], what)
         if what == "frequency_Hz":
-            return float(self.ask("OF."))
+            return self._query("OF.", float, what)
         if what == "time_constant_s":
-            return TIME_CONSTANTS[int(self.ask("TC"))]
+            return self._query("TC", lambda r: TIME_CONSTANTS[int(r)], what)
         if what == "phase_deg":
-            return float(self.ask("REFP."))
+            return self._query("REFP.", float, what)
         if what == "reference_mode":
-            return int(self.ask("REFMODE"))
+            return self._query("REFMODE", int, what)
         if what == "identification":
             return f"{self.ask('ID')}/{self.ask('VER')}"
         raise ServiceError(ErrorCode.UNKNOWN_ATTRIBUTE, what)

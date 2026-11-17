@@ -189,14 +189,33 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   Calibration tab's plot choice is saved per account and setup with the
   calibration box (working state `calib_plot`); logging out resets it.
 
+* 2026-11-17 — **Lock-in framing, forced release, restart message** (branch
+  `fix/lockin-framing-recovery`, from `main` at `a62d2df`).  On the rig the
+  7270 answered an oscillator read with `'9-9.734E-04,-1.5E-03'`: during
+  an overload (0.5 mV sensitivity, ~1.8 mV signal) its status/overload byte
+  pair has no NUL, so a NUL-terminated read ran into the next reply.  The
+  lock-in was marked faulted, releasing control could not confirm the
+  oscillator was off, and the lease stayed RECONCILING until a service
+  restart ("Force release" could not reconnect it).  Now the pair is read by
+  count, an overload is logged, an unreadable reply re-syncs and is asked
+  once more without faulting the lock-in; a forced release reconnects faulted
+  devices and never leaves the setup blocked.  Samba_mini / Samba_controls
+  record the service instance at login (no "restarted" warning every 2 s).
+  Samba_mini no longer freezes while Samba_controls is not started: its 2 s
+  service check waited ~1.5 s on the GUI thread and runs in the background
+  now.  An auto-pause (e.g. disk full) keeps its reason: one stale RUNNING
+  poll of the service no longer counts as a resume.  Tests: a Samba_controls
+  window garbage-collected mid-session made a later test crash now and then;
+  its timers stop on close.  Simulation and fake drivers only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **148 passed** (≈200 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **154 passed** (≈200 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
-engine 13, drivers 14, core 16, recovery 4, process 2, GUI 16, review
+engine 13, drivers 16, core 16, recovery 4, process 2, GUI 16, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 16,
 device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4,
-settle/calibration box/units 7.
+settle/calibration box/units 7, stuck control 4.
 See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
