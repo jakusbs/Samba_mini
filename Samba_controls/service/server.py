@@ -37,6 +37,9 @@ from Samba_controls.service.worker import CancelToken
 
 log = logging.getLogger(__name__)
 
+#: Capabilities announced in ``server.hello`` (see core.client.ServiceClient.has_feature).
+SERVICE_FEATURES = ("calibration-records-1", "presets-atomic-1")
+
 
 class ServiceServer:
     def __init__(self, cfg: MachineConfig, accounts_path: Path, state_dir: Path,
@@ -359,10 +362,26 @@ class ServiceServer:
         m["prefs.get"] = ("auth", lambda s, p, r: self.accounts.get_prefs(s.user_id))
         m["prefs.set"] = ("auth", lambda s, p, r: self.accounts.set_prefs(s.user_id, p.get("values")))
         m["presets.list"] = ("auth", lambda s, p, r: self.accounts.list_presets(s.user_id, p.get("workflow")))
+        m["presets.get"] = ("auth", lambda s, p, r: self.accounts.get_preset(
+            s.user_id, _str(p, "workflow"), _str(p, "name")))
         m["presets.save"] = ("auth", lambda s, p, r: self.accounts.save_preset(
-            s.user_id, _str(p, "workflow"), _str(p, "name"), p.get("value")))
+            s.user_id, _str(p, "workflow"), _str(p, "name"), p.get("value"), p.get("mode", "overwrite")))
+        m["presets.rename"] = ("auth", lambda s, p, r: self.accounts.rename_preset(
+            s.user_id, _str(p, "workflow"), _str(p, "name"), _str(p, "new_name")))
+        m["presets.copy"] = ("auth", lambda s, p, r: self.accounts.copy_preset(
+            s.user_id, _str(p, "workflow"), _str(p, "name"), _str(p, "new_name")))
         m["presets.delete"] = ("auth", lambda s, p, r: self.accounts.delete_preset(
             s.user_id, _str(p, "workflow"), _str(p, "name")))
+        # Calibration records (per account; immutable versions; see docs/profiles-and-calibration.md)
+        m["calibration.save"] = ("auth", lambda s, p, r: self.accounts.save_calibration(
+            s.user, p.get("record"), p.get("base") or None, self.cfg.mode))
+        m["calibration.get"] = ("auth", lambda s, p, r: self.accounts.get_calibration(s.user_id, _str(p, "id")))
+        m["calibration.list"] = ("auth", lambda s, p, r: self.accounts.list_calibrations(
+            s.user_id, p.get("setup") or None, int(p.get("limit", 200))))
+        m["calibration.active"] = ("auth", lambda s, p, r: self.accounts.active_calibration(
+            s.user_id, _str(p, "setup")))
+        m["calibration.activate"] = ("auth", lambda s, p, r: self.accounts.activate_calibration(
+            s.user_id, _str(p, "setup"), p.get("id") or None, p.get("sample_id")))
         m["config.get"] = ("auth", self._config_get)
 
     # ================================================================ handlers
@@ -380,6 +399,9 @@ class ServiceServer:
             "needs_bootstrap": self.accounts.user_count() == 0,
             "rpc_port": self.rpc_port,
             "event_port": self.event_port,
+            # Additive capabilities (same protocol major): clients check these before relying on
+            # newer methods, so an older running service gives a clear message, not UNKNOWN_METHOD.
+            "features": list(SERVICE_FEATURES),
         }
 
     def status_public(self) -> dict:

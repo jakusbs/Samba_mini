@@ -43,6 +43,10 @@ class ServiceClient:
         self.client_name = client_name
         self.session: str | None = None
         self.user: dict | None = None
+        #: Incremented whenever the session changes (login, logout, expiry).  GUIs tag their
+        #: background requests with it and drop replies that belong to an earlier session.
+        self.session_epoch = 0
+        self.features: set[str] = set()
         self.instance_id: str | None = None
         self.late_replies = 0
         self._ctx = zmq.Context()
@@ -154,8 +158,11 @@ class ServiceClient:
         if msg.get("ok"):
             return msg.get("result")
         err = ServiceError.from_dict(msg.get("error") or {})
-        if err.code == ErrorCode.AUTH_REQUIRED and self.session:
+        if err.code == ErrorCode.AUTH_REQUIRED and self.session and req.get("session") == self.session:
             self.session = None
+            self.user = None
+            self.lease_holder = False
+            self.session_epoch += 1
             self._notify("session_lost", {"message": err.message})
         raise err
 
@@ -194,13 +201,20 @@ class ServiceClient:
         if self.instance_id and info["instance_id"] != self.instance_id:
             self._notify("restarted", info)
         self.instance_id = info["instance_id"]
+        self.features = set(info.get("features") or ())
         return info
+
+    def has_feature(self, name: str) -> bool:
+        """True when the connected service announced *name* in ``server.hello`` (services older
+        than the feature do not, and answer its methods with UNKNOWN_METHOD)."""
+        return name in getattr(self, "features", set())
 
     def login(self, username: str, password: str) -> dict:
         res = self.call("auth.login", {"username": username, "password": password,
                                        "client": self.client_name}, 15.0)
         self.session = res["session"]
         self.user = res["user"]
+        self.session_epoch += 1
         self.start_heartbeat()
         return res
 
@@ -216,6 +230,7 @@ class ServiceClient:
                 self.session = None
                 self.user = None
                 self.lease_holder = False
+                self.session_epoch += 1
 
     def start_heartbeat(self) -> None:
         if self._hb_thread and self._hb_thread.is_alive():

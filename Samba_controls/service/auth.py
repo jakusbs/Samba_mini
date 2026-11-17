@@ -38,7 +38,66 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$")
 MIN_PASSWORD_LEN = 8
 ROLES = ("admin", "operator")
 
-SCHEMA_VERSION = 1
+#: Setups a calibration record can belong to (Samba_mini's two stages).
+CAL_SETUPS = ("longitudinal", "polar")
+CAL_MODES = ("real", "simulation")
+CAL_ORIGINS = ("manual", "fit", "migrated")
+CAL_N_VALUES = 6
+
+SCHEMA_VERSION = 2
+
+
+def _migrate_bd_prefs_to_records(db: sqlite3.Connection) -> None:
+    """Schema 2: turn the old per-user preference ``bd_calibration_<setup>`` (six mV values plus a
+    ``bd_calibration_date_<setup>`` string) into calibration records, active for that user and setup
+    as before.  Only what was stored is carried over: the creator is the account that held the
+    preference and the date is the saved date; sample, acquisition mode, source file and fit are
+    recorded as unknown (NULL), never guessed.  The preferences themselves are left in place."""
+    users = {r[0]: r[1] for r in db.execute("SELECT id, username FROM users")}
+    rows = db.execute("SELECT user_id, key, value FROM prefs WHERE key LIKE 'bd_calibration_%'").fetchall()
+    prefs: dict[tuple[int, str], object] = {}
+    for uid, key, value in rows:
+        try:
+            prefs[(uid, key)] = json.loads(value)
+        except (TypeError, ValueError):
+            prefs[(uid, key)] = None
+    now = time.time()
+    for (uid, key), vals in sorted(prefs.items()):
+        setup = key[len("bd_calibration_"):]
+        if setup not in CAL_SETUPS:
+            continue                                  # bd_calibration_date_* and anything unknown
+        try:
+            values = [float(v) for v in vals]         # type: ignore[union-attr]
+        except (TypeError, ValueError):
+            log.warning("migration: preference %s of user %s is not a calibration; left as is", key, uid)
+            continue
+        if len(values) != CAL_N_VALUES or not all(v == v for v in values) or not any(values):
+            continue                                  # all zeros meant "no calibration"
+        created = None
+        date = prefs.get((uid, f"bd_calibration_date_{setup}"))
+        if isinstance(date, str) and date.strip():
+            try:
+                created = time.mktime(time.strptime(date.strip(), "%Y-%m-%d %H:%M"))
+            except ValueError:
+                created = None
+        rec_id = _new_cal_id()
+        db.execute(
+            "INSERT INTO calibrations (uid, series, version, user_id, creator, created, recorded, setup, "
+            "sample_id, name, values_json, unit, mode, service_mode, source_file, fit_json, origin, note) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec_id, rec_id, 1, uid, users.get(uid, ""), created, now, setup, None,
+             f"Saved calibration ({setup})", json.dumps(values), "mV", None, None, None, None, "migrated",
+             f"Migrated from the preference '{key}'"
+             + (f" saved {date}" if isinstance(date, str) and date else "")
+             + "; sample, acquisition mode and source file were not recorded (unknown)."))
+        db.execute("INSERT OR REPLACE INTO calibration_active (user_id, setup, uid, sample_id, activated) "
+                   "VALUES (?,?,?,?,?)", (uid, setup, rec_id, None, now))
+        log.info("migration: %s calibration of user %s -> record %s", setup, users.get(uid, uid), rec_id)
+
+
+def _new_cal_id() -> str:
+    return "cal-" + secrets.token_hex(6)
+
 
 _MIGRATIONS = {
     1: [
@@ -67,6 +126,44 @@ _MIGRATIONS = {
                updated REAL NOT NULL,
                PRIMARY KEY (user_id, workflow, name)
            )""",
+    ],
+    2: [
+        # One row per immutable calibration version.  ``series`` groups the versions of one
+        # calibration; ``created`` is when it was made (NULL = unknown, migrated records),
+        # ``recorded`` when this row was written.  NULL sample/mode/source = unknown.
+        """CREATE TABLE calibrations (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               uid TEXT NOT NULL UNIQUE,
+               series TEXT NOT NULL,
+               version INTEGER NOT NULL,
+               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+               creator TEXT NOT NULL,
+               created REAL,
+               recorded REAL NOT NULL,
+               setup TEXT NOT NULL,
+               sample_id TEXT,
+               name TEXT NOT NULL DEFAULT '',
+               values_json TEXT NOT NULL,
+               unit TEXT NOT NULL DEFAULT 'mV',
+               mode TEXT,
+               service_mode TEXT,
+               source_file TEXT,
+               fit_json TEXT,
+               origin TEXT NOT NULL,
+               note TEXT NOT NULL DEFAULT '',
+               UNIQUE (series, version)
+           )""",
+        "CREATE INDEX calibrations_owner ON calibrations (user_id, setup, recorded)",
+        # The calibration a user has activated for the experiment on a setup.
+        """CREATE TABLE calibration_active (
+               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+               setup TEXT NOT NULL,
+               uid TEXT NOT NULL REFERENCES calibrations(uid) ON DELETE CASCADE,
+               sample_id TEXT,
+               activated REAL NOT NULL,
+               PRIMARY KEY (user_id, setup)
+           )""",
+        _migrate_bd_prefs_to_records,
     ],
 }
 
@@ -118,7 +215,10 @@ class AccountStore:
                     self._db.execute("CREATE TABLE schema_version (version INTEGER NOT NULL, applied REAL NOT NULL)")
                 for version in range(current + 1, SCHEMA_VERSION + 1):
                     for stmt in _MIGRATIONS[version]:
-                        self._db.execute(stmt)
+                        if callable(stmt):
+                            stmt(self._db)
+                        else:
+                            self._db.execute(stmt)
                     self._db.execute("INSERT INTO schema_version VALUES (?, ?)", (version, time.time()))
                 self._db.execute("COMMIT")
             except Exception:
@@ -271,18 +371,99 @@ class AccountStore:
         return [{"workflow": r["workflow"], "name": r["name"], "value": json.loads(r["value"]),
                  "updated": r["updated"]} for r in rows]
 
-    def save_preset(self, user_id: int, workflow: str, name: str, value: dict) -> None:
+    @staticmethod
+    def _check_preset_key(workflow, name) -> None:
         if not workflow or not isinstance(workflow, str) or len(workflow) > 64:
             raise ServiceError(ErrorCode.INVALID_VALUE, "bad workflow name")
-        if not name or not isinstance(name, str) or len(name) > 80:
-            raise ServiceError(ErrorCode.INVALID_VALUE, "preset name must be 1-80 characters")
+        if not name or not isinstance(name, str) or len(name) > 80 or name != name.strip():
+            raise ServiceError(ErrorCode.INVALID_VALUE, "preset name must be 1-80 characters "
+                               "without leading or trailing spaces")
+
+    def get_preset(self, user_id: int, workflow: str, name: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT workflow, name, value, updated FROM presets WHERE user_id=? AND "
+                                   "workflow=? AND name=?", (user_id, workflow, name)).fetchone()
+        if row is None:
+            return None
+        return {"workflow": row["workflow"], "name": row["name"], "value": json.loads(row["value"]),
+                "updated": row["updated"]}
+
+    def save_preset(self, user_id: int, workflow: str, name: str, value: dict, mode: str = "overwrite") -> dict:
+        """Save a preset.  ``mode``: "overwrite" (create or replace, the original behaviour),
+        "create" (refuse when the name exists) or "update" (refuse when it does not)."""
+        self._check_preset_key(workflow, name)
         if not isinstance(value, dict):
             raise ServiceError(ErrorCode.INVALID_VALUE, "preset value must be an object")
+        if mode not in ("overwrite", "create", "update"):
+            raise ServiceError(ErrorCode.BAD_REQUEST, f"unknown save mode {mode!r}")
         with self._lock:
-            self._db.execute(
-                "INSERT INTO presets (user_id, workflow, name, value, updated) VALUES (?,?,?,?,?) "
-                "ON CONFLICT(user_id, workflow, name) DO UPDATE SET value=excluded.value, updated=excluded.updated",
-                (user_id, workflow, name, json.dumps(value), time.time()))
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                exists = self._db.execute("SELECT 1 FROM presets WHERE user_id=? AND workflow=? AND name=?",
+                                          (user_id, workflow, name)).fetchone() is not None
+                if mode == "create" and exists:
+                    raise ServiceError(ErrorCode.CONFLICT, f"a configuration named {name!r} already exists",
+                                       {"name": name})
+                if mode == "update" and not exists:
+                    raise ServiceError(ErrorCode.CONFLICT, f"configuration {name!r} no longer exists",
+                                       {"name": name})
+                self._db.execute(
+                    "INSERT INTO presets (user_id, workflow, name, value, updated) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(user_id, workflow, name) DO UPDATE SET value=excluded.value, "
+                    "updated=excluded.updated", (user_id, workflow, name, json.dumps(value), time.time()))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return self.get_preset(user_id, workflow, name)
+
+    def rename_preset(self, user_id: int, workflow: str, old: str, new: str) -> dict:
+        """Rename in one transaction; refuses (CONFLICT) when *new* exists, so it never overwrites."""
+        self._check_preset_key(workflow, old)
+        self._check_preset_key(workflow, new)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                if self._db.execute("SELECT 1 FROM presets WHERE user_id=? AND workflow=? AND name=?",
+                                    (user_id, workflow, old)).fetchone() is None:
+                    raise ServiceError(ErrorCode.CONFLICT, f"configuration {old!r} no longer exists",
+                                       {"name": old})
+                if old != new and self._db.execute(
+                        "SELECT 1 FROM presets WHERE user_id=? AND workflow=? AND name=?",
+                        (user_id, workflow, new)).fetchone() is not None:
+                    raise ServiceError(ErrorCode.CONFLICT, f"a configuration named {new!r} already exists",
+                                       {"name": new})
+                self._db.execute("UPDATE presets SET name=?, updated=? WHERE user_id=? AND workflow=? AND name=?",
+                                 (new, time.time(), user_id, workflow, old))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return self.get_preset(user_id, workflow, new)
+
+    def copy_preset(self, user_id: int, workflow: str, src: str, dst: str) -> dict:
+        """Copy the *stored* preset *src* to the new name *dst* (CONFLICT when *dst* exists)."""
+        self._check_preset_key(workflow, src)
+        self._check_preset_key(workflow, dst)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute("SELECT value FROM presets WHERE user_id=? AND workflow=? AND name=?",
+                                       (user_id, workflow, src)).fetchone()
+                if row is None:
+                    raise ServiceError(ErrorCode.CONFLICT, f"configuration {src!r} no longer exists",
+                                       {"name": src})
+                if self._db.execute("SELECT 1 FROM presets WHERE user_id=? AND workflow=? AND name=?",
+                                    (user_id, workflow, dst)).fetchone() is not None:
+                    raise ServiceError(ErrorCode.CONFLICT, f"a configuration named {dst!r} already exists",
+                                       {"name": dst})
+                self._db.execute("INSERT INTO presets (user_id, workflow, name, value, updated) VALUES (?,?,?,?,?)",
+                                 (user_id, workflow, dst, row["value"], time.time()))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return self.get_preset(user_id, workflow, dst)
 
     def delete_preset(self, user_id: int, workflow: str, name: str) -> bool:
         with self._lock:
@@ -290,11 +471,141 @@ class AccountStore:
                                    (user_id, workflow, name))
             return cur.rowcount > 0
 
+    # ------------------------------------------------------- calibrations --
+    def save_calibration(self, user: dict, rec: dict, base: str | None = None,
+                         service_mode: str | None = None) -> dict:
+        """Store a new immutable calibration version.  With *base* (an existing record id of
+        this user) it becomes the next version of that calibration, otherwise version 1 of a
+        new one.  Creator and timestamps are set here, never taken from the client."""
+        if not isinstance(rec, dict):
+            raise ServiceError(ErrorCode.INVALID_VALUE, "calibration must be an object")
+        setup = rec.get("setup")
+        if setup not in CAL_SETUPS:
+            raise ServiceError(ErrorCode.INVALID_VALUE, f"setup must be one of {CAL_SETUPS}")
+        vals = rec.get("values")
+        try:
+            values = [float(v) for v in vals]
+        except (TypeError, ValueError):
+            raise ServiceError(ErrorCode.INVALID_VALUE, "values must be six numbers") from None
+        if len(values) != CAL_N_VALUES or not all(v == v and abs(v) != float("inf") for v in values):
+            raise ServiceError(ErrorCode.INVALID_VALUE, "values must be six finite numbers")
+        unit = rec.get("unit", "mV")
+        if unit != "mV":
+            raise ServiceError(ErrorCode.INVALID_VALUE, "calibration values are stored in mV")
+        mode = rec.get("mode")
+        if mode is not None and mode not in CAL_MODES:
+            raise ServiceError(ErrorCode.INVALID_VALUE, f"mode must be one of {CAL_MODES} or null (unknown)")
+        origin = rec.get("origin", "manual")
+        if origin not in ("manual", "fit"):
+            raise ServiceError(ErrorCode.INVALID_VALUE, "origin must be 'manual' or 'fit'")
+        sample = rec.get("sample_id")
+        if sample is not None and (not isinstance(sample, str) or len(sample) > 120):
+            raise ServiceError(ErrorCode.INVALID_VALUE, "sample_id must be text (or null = unknown)")
+        sample = (sample or "").strip() or None
+        name = str(rec.get("name") or "").strip()[:80]
+        note = str(rec.get("note") or "")[:1000]
+        source = rec.get("source_file")
+        source = str(source)[:1000] if source else None
+        fit = rec.get("fit")
+        if fit is not None and not isinstance(fit, dict):
+            raise ServiceError(ErrorCode.INVALID_VALUE, "fit must be an object")
+        now = time.time()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                if base:
+                    row = self._db.execute("SELECT series, setup FROM calibrations WHERE uid=? AND user_id=?",
+                                           (base, user["id"])).fetchone()
+                    if row is None:
+                        raise ServiceError(ErrorCode.CONFLICT, f"calibration {base!r} not found", {"id": base})
+                    if row["setup"] != setup:
+                        raise ServiceError(ErrorCode.INVALID_VALUE, "a new version must keep the setup "
+                                           f"({row['setup']}); use Save as new for another setup")
+                    series = row["series"]
+                    version = int(self._db.execute("SELECT MAX(version) FROM calibrations WHERE series=?",
+                                                   (series,)).fetchone()[0]) + 1
+                else:
+                    series, version = None, 1
+                uid = _new_cal_id()
+                series = series or uid
+                self._db.execute(
+                    "INSERT INTO calibrations (uid, series, version, user_id, creator, created, recorded, setup, "
+                    "sample_id, name, values_json, unit, mode, service_mode, source_file, fit_json, origin, note) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (uid, series, version, user["id"], user["username"], now, now, setup, sample, name,
+                     json.dumps(values), unit, mode, service_mode, source,
+                     json.dumps(fit, default=str) if fit is not None else None, origin, note))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return self.get_calibration(user["id"], uid)
+
+    def get_calibration(self, user_id: int, uid: str) -> dict:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM calibrations WHERE uid=? AND user_id=?", (uid, user_id)).fetchone()
+        if row is None:
+            raise ServiceError(ErrorCode.CONFLICT, f"calibration {uid!r} not found", {"id": uid})
+        return _public_calibration(row)
+
+    def list_calibrations(self, user_id: int, setup: str | None = None, limit: int = 200) -> list[dict]:
+        q = "SELECT * FROM calibrations WHERE user_id=?"
+        args: list = [user_id]
+        if setup:
+            q += " AND setup=?"
+            args.append(setup)
+        q += " ORDER BY recorded DESC, id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 1000)))
+        with self._lock:
+            rows = self._db.execute(q, args).fetchall()
+        return [_public_calibration(r) for r in rows]
+
+    def active_calibration(self, user_id: int, setup: str) -> dict:
+        if setup not in CAL_SETUPS:
+            raise ServiceError(ErrorCode.INVALID_VALUE, f"setup must be one of {CAL_SETUPS}")
+        with self._lock:
+            row = self._db.execute("SELECT uid, sample_id, activated FROM calibration_active WHERE user_id=? "
+                                   "AND setup=?", (user_id, setup)).fetchone()
+        if row is None:
+            return {"setup": setup, "record": None, "sample_id": None, "activated": None}
+        return {"setup": setup, "record": self.get_calibration(user_id, row["uid"]),
+                "sample_id": row["sample_id"], "activated": row["activated"]}
+
+    def activate_calibration(self, user_id: int, setup: str, uid: str | None, sample_id: str | None) -> dict:
+        """Make *uid* the active calibration of this user's experiment on *setup* (None = none).
+        ``sample_id`` is the experiment's sample it was activated for."""
+        if setup not in CAL_SETUPS:
+            raise ServiceError(ErrorCode.INVALID_VALUE, f"setup must be one of {CAL_SETUPS}")
+        with self._lock:
+            if uid is None:
+                self._db.execute("DELETE FROM calibration_active WHERE user_id=? AND setup=?", (user_id, setup))
+            else:
+                rec = self.get_calibration(user_id, uid)
+                if rec["setup"] != setup:
+                    raise ServiceError(ErrorCode.INVALID_VALUE, f"calibration {uid} belongs to the "
+                                       f"{rec['setup']} setup, not {setup}")
+                sample = (sample_id or "").strip() or None if isinstance(sample_id, (str, type(None))) else None
+                self._db.execute("INSERT OR REPLACE INTO calibration_active (user_id, setup, uid, sample_id, "
+                                 "activated) VALUES (?,?,?,?,?)", (user_id, setup, uid, sample, time.time()))
+        return self.active_calibration(user_id, setup)
+
 
 def _public_user(row) -> dict:
     return {"id": row["id"], "username": row["username"], "role": row["role"],
             "full_name": row["full_name"], "disabled": bool(row["disabled"]),
             "created": row["created"], "last_login": row["last_login"]}
+
+
+def _public_calibration(row) -> dict:
+    """A calibration record as sent to clients and written into measurement files.
+    ``None`` means unknown (e.g. the sample of a migrated record)."""
+    return {"id": row["uid"], "series": row["series"], "version": row["version"], "name": row["name"],
+            "creator": row["creator"], "created": row["created"], "recorded": row["recorded"],
+            "setup": row["setup"], "sample_id": row["sample_id"], "values": json.loads(row["values_json"]),
+            "unit": row["unit"], "mode": row["mode"], "service_mode": row["service_mode"],
+            "source_file": row["source_file"],
+            "fit": json.loads(row["fit_json"]) if row["fit_json"] else None,
+            "origin": row["origin"], "note": row["note"]}
 
 
 # ---------------------------------------------------------------------------
