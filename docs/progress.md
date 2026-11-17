@@ -208,6 +208,13 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   window garbage-collected mid-session made a later test crash now and then;
   its timers stop on close.  Simulation and fake drivers only.
 
+* 2026-11-17 — **7270 overload messages limited** (branch
+  `fix/lockin-overload-log`, from `main` at `b4fae7b`).  On the rig the
+  signal sat at the edge of the 0.5 mV range: the overload byte flipped every
+  ~4 s and each flip wrote a warning or a "cleared" line.  Now one warning
+  per 5 min with the number of overloaded replies, and "no overload" only
+  after a minute without one.  Fake drivers only.
+
 * 2026-11-17 — **XY map without zigzag, fewer greyed controls during a run**
   (branch `feature/xy-raster-live-ui`, from `main` at `b4fae7b`).  An XY map
   is still measured column by column with Y as the fast axis, but Y now runs
@@ -227,9 +234,9 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
 
 ## Tests
 
-`scripts\run_tests.bat` → **154 passed** (≈200 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **157 passed** (≈270 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
-engine 13, drivers 16, core 16, recovery 4, process 2, GUI 16, review
+engine 14, drivers 17, core 16, recovery 4, process 2, GUI 17, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 16,
 device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4,
 settle/calibration box/units 7, stuck control 4.

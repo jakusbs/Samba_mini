@@ -58,6 +58,12 @@ DRAIN_TIMEOUT_MS = 100
 # A status chunk that turns up after the drain gave up is discarded before the
 # next command, so it can never be read as that command's reply.
 LATE_FLUSH_TIMEOUT_MS = 20
+# A signal at the edge of the range flips the overload byte every few seconds (17 Nov: a warning
+# and a "cleared" line every ~4 s).  Warn at most every OVERLOAD_LOG_INTERVAL_S, counting the
+# overloaded replies in between; "no overload" only after OVERLOAD_CLEAR_S without one.
+OVERLOAD_LOG_INTERVAL_S = 300.0
+OVERLOAD_CLEAR_S = 60.0
+_now = time.monotonic
 USB_RESET_FROM_ATTEMPT = 3
 USB_RESET_SETTLE_S = 5.0
 
@@ -80,6 +86,9 @@ class Ametek7270(LockinBase):
         self.missing_chunks = 0           # replies whose status chunk did not come (diagnostics)
         self.status_byte: int | None = None
         self.overload_byte = 0            # last overload byte (0: no overload)
+        self.overloaded_replies = 0       # overloaded replies since the last overload warning
+        self._overload_warned_t: float | None = None   # last warning (None: none in this episode)
+        self._last_overload_t = 0.0
         self.resyncs = 0                  # unreadable replies that needed a re-sync (diagnostics)
 
     # ------------------------------------------------------------ session
@@ -172,11 +181,22 @@ class Ametek7270(LockinBase):
             return
         self.status_byte = raw[0]
         overload = raw[1]
-        if overload and not self.overload_byte:
-            log.warning("7270 reports an overload (overload byte 0x%02x): the signal is larger than the "
-                        "sensitivity range -- choose a larger sensitivity", overload)
-        elif self.overload_byte and not overload:
-            log.info("7270: overload cleared")
+        now = _now()
+        if overload:
+            self._last_overload_t = now
+            self.overloaded_replies += 1
+            if self._overload_warned_t is None or now - self._overload_warned_t >= OVERLOAD_LOG_INTERVAL_S:
+                since = (f"; {self.overloaded_replies} overloaded replies in the last "
+                         f"{(now - self._overload_warned_t) / 60:.0f} min" if self._overload_warned_t is not None
+                         else "")
+                log.warning("7270 reports an overload (overload byte 0x%02x): the signal is larger than the "
+                            "sensitivity range -- choose a larger sensitivity%s", overload, since)
+                self._overload_warned_t = now
+                self.overloaded_replies = 0
+        elif self._overload_warned_t is not None and now - self._last_overload_t >= OVERLOAD_CLEAR_S:
+            log.info("7270: no overload for %.0f s", OVERLOAD_CLEAR_S)
+            self._overload_warned_t = None            # a new overload is reported right away
+            self.overloaded_replies = 0
         self.overload_byte = overload
 
     def _drain(self) -> None:
