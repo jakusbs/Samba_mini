@@ -131,6 +131,10 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
 
 ## 5. Data
 
+Every account has its own data folder, `Documents\SambaMini Data\<user name>`,
+created at login and shown in the Data Browser (a user can choose another one in
+the Profile tab; *Own folder* goes back).
+
 `<data folder>\<YYYYMMDD>\<HHMMSS>_<TYPE>_<sample>_<config>[_SIM].h5`, Samba
 layout (opens in Samba's data browser).  `scan_status` is `running` until the
 run ends, then `completed`, `aborted`, `failed` or `interrupted`.

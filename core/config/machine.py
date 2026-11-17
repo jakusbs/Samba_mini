@@ -16,8 +16,10 @@ edited by an administrator and shared by everyone using the PC.
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import os
+import re
 import shutil
 import time
 import tomllib
@@ -44,6 +46,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "daq": {
         "enabled": True,
+        "label": "NI-DAQ",               # display name (the device's id "daq" never changes)
+        "start_order": 10,               # devices connect one after another, lowest first
         "device": "Dev1",
         "ao_mod1": "Dev1/ao1",
         "ao_mod2": "Dev1/ao2",
@@ -63,6 +67,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "lockin": {
         "enabled": True,
+        "label": "Lock-in (Ametek 7270)",
+        "start_order": 20,
         "model": "ametek7270",
         "resource": "USB0::0x0A2D::0x001B::15342534::RAW",
         "timeout_ms": 2000,
@@ -72,6 +78,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "hall": {
         "enabled": True,
+        "label": "Hall probe (Magnet-Physik)",
+        "start_order": 30,
         "dll_path": "",
         "speed": 1,
         "default_integration_s": 0.5,
@@ -79,6 +87,8 @@ DEFAULTS: dict[str, Any] = {
     "stages": {
         "longitudinal": {
             "enabled": True,
+            "label": "Longitudinal stage (Thorlabs Kinesis)",
+            "start_order": 40,
             "driver": "kinesis",
             "serial_x": "",
             "serial_y": "",
@@ -89,6 +99,8 @@ DEFAULTS: dict[str, Any] = {
         },
         "polar": {
             "enabled": True,
+            "label": "Polar stage (Trinamic TMCM-3212)",
+            "start_order": 50,
             "driver": "trinamic",
             "port": "auto",
             "module_id": 1,
@@ -104,6 +116,38 @@ DEFAULTS: dict[str, Any] = {
         "stop_stages": True,
     },
 }
+
+
+#: Device sections an administrator edits in Samba_controls (``stages`` holds any number of stages).
+DEVICE_SECTIONS = ("daq", "lockin", "hall")
+#: Stages Samba_mini's setups measure with: they can be edited and disabled, not removed.
+SETUP_STAGES = ("longitudinal", "polar")
+#: Stage drivers that exist; a new stage must use one of them (a new type needs a driver in code).
+STAGE_DRIVERS = {"kinesis": "Thorlabs Kinesis", "trinamic": "Trinamic TMCM-3212"}
+STAGE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
+LABEL_MAX = 60
+
+
+def stage_template(driver: str, key: str) -> dict:
+    """Settings of a new stage of an existing driver type (the defaults of that type)."""
+    if driver not in STAGE_DRIVERS:
+        raise ConfigError(f"no driver {driver!r}; available: {', '.join(STAGE_DRIVERS)}")
+    base = DEFAULTS["stages"]["longitudinal" if driver == "kinesis" else "polar"]
+    st = copy.deepcopy(base)
+    st.update(label=f"{key} stage ({STAGE_DRIVERS[driver]})", start_order=60)
+    for k in ("serial_x", "serial_y", "serial_z"):
+        if k in st:
+            st[k] = ""
+    return st
+
+
+def device_sections(cfg: dict) -> dict[str, dict]:
+    """Device id -> its configuration section (``daq``, ``lockin``, ``hall``, ``stage_<key>``)."""
+    out = {name: cfg[name] for name in DEVICE_SECTIONS if isinstance(cfg.get(name), dict)}
+    for key, st in (cfg.get("stages") or {}).items():
+        if isinstance(st, dict):
+            out[f"stage_{key}"] = st
+    return out
 
 
 class ConfigError(Exception):
@@ -165,7 +209,23 @@ def validate(cfg: dict) -> list[str]:
     rate = cfg["daq"].get("sampling_rate_Hz")
     if not isinstance(rate, (int, float)) or rate <= 0:
         problems.append("daq.sampling_rate_Hz must be positive")
+    for dev, sec in device_sections(cfg).items():
+        label = sec.get("label")
+        if label is not None and (not isinstance(label, str) or not label.strip() or len(label) > LABEL_MAX):
+            problems.append(f"{dev}.label must be 1-{LABEL_MAX} characters")
+        order = sec.get("start_order")
+        if order is not None and (isinstance(order, bool) or not isinstance(order, int) or not 0 <= order <= 999):
+            problems.append(f"{dev}.start_order must be an integer 0-999")
+        if not isinstance(sec.get("enabled", True), bool):
+            problems.append(f"{dev}.enabled must be true or false")
     for name, st in cfg.get("stages", {}).items():
+        if not STAGE_KEY_RE.match(str(name)):
+            problems.append(f"stage name {name!r}: lower-case letters, digits and '_' (max 24), starting with a letter")
+        if not isinstance(st, dict):
+            problems.append(f"stages.{name} must be a table")
+            continue
+        if st.get("driver") not in STAGE_DRIVERS:
+            problems.append(f"stages.{name}.driver must be one of {', '.join(STAGE_DRIVERS)}")
         lim = st.get("limits_mm")
         if lim is not None:
             if not isinstance(lim, dict):
@@ -261,6 +321,33 @@ def save(data: dict, path: Path | str | None = None, backup: bool = True) -> Pat
         os.fsync(f.fileno())
     os.replace(tmp, path)
     return path
+
+
+def peek(path: Path | str | None = None) -> MachineConfig:
+    """Read the file without side effects (no ``.bad`` copy, no migration save): for showing it
+    and for editing it.  Status "defaults" when it does not exist."""
+    path = Path(path) if path else paths.machine_config_path()
+    if not path.exists():
+        return MachineConfig(copy.deepcopy(DEFAULTS), path, "defaults", [f"no configuration at {path}"])
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        if int(raw.get("schema_version", 0) or 0) > SCHEMA_VERSION:
+            raise ConfigError(f"configuration schema {raw.get('schema_version')} is newer than this software")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ConfigError, ValueError, TypeError) as exc:
+        return MachineConfig(copy.deepcopy(DEFAULTS), path, "invalid", [f"cannot read {path}: {exc}"])
+    data = deep_merge(DEFAULTS, raw)
+    problems = validate(data)
+    return MachineConfig(data, path, "invalid" if problems else "loaded", problems)
+
+
+def file_hash(path: Path | str | None = None) -> str:
+    """Fingerprint of the file on disk (empty when it does not exist), to refuse saving over
+    changes made since it was read."""
+    path = Path(path) if path else paths.machine_config_path()
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 def _strip_none(d):

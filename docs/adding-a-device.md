@@ -1,5 +1,30 @@
 # How Samba_controls works, and how to add a device
 
+## 0. Without code: *Device settings* and the start-up lights
+
+* **Start-up lights** (row under the action bar): one light per instrument,
+  in start order.  At service start the instruments connect one after another
+  (lowest `start_order` first, like Astor's levels): hollow = waiting, yellow
+  blinking = connecting, green = running, blue = busy, red = fault, grey = off,
+  dark = disabled.  They work before anyone logs in; click one to select the
+  instrument.
+* **Device settings** tab (administrators): for every instrument the display
+  name (`label`; the device id such as `lockin` or `stage_polar`, which
+  measurements use, never changes), *enabled*, `start_order` and its connection
+  settings (VISA resource, serial numbers, COM port, DLL path, ...).  *Add
+  stage…* adds another stage of a type that has a driver (Thorlabs Kinesis or
+  Trinamic TMCM-3212), *Remove* removes an added one (the two setup stages can
+  only be disabled).  *Save* goes through the service: administrators only,
+  validated, refused if `machine.toml` changed meanwhile, the old file backed up
+  to `config\backups`, the other sections (ports, coil, cleanup) untouched.  The
+  window then offers to restart the service, which applies the settings.
+  Extra stages appear in Samba_controls (readbacks, manual control); Samba_mini's
+  measurements use the longitudinal and polar stages.
+
+A new instrument **type** still needs a driver (section 2); to make its settings
+editable in the form, add its section name to `DEVICE_SECTIONS` in
+`core/config/machine.py` and give it a `label` and `start_order`.
+
 ## 1. The pieces
 
 ```

@@ -137,12 +137,24 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   fake drivers only; the running real-mode service on the PC was not touched
   (work done in a separate worktree).
 
+* 2026-11-17 — **Per-user data folders, device settings, start-up lights**
+  (branch `feature/user-folders-device-editor`, from `main` at `25681d3`).
+  Each account measures into `Documents\SambaMini Data\<user>` (created at
+  login, shown in the Data Browser; the old shared default becomes the
+  account's own folder).  Samba_controls: display names for every instrument,
+  a *Device settings* tab (administrators: enabled, start order, connection
+  settings, extra Kinesis/Trinamic stages; saved through the service with
+  validation, conflict check and backup; restart offered), and a row of
+  start-up lights — the instruments now connect one after another in
+  `start_order` (Astor-like) instead of in parallel.  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **122 passed** (≈130 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **130 passed** (≈140 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
 engine 13, drivers 14, core 16, recovery 4, process 2, GUI 16, review
-regressions 22, profiles/calibration backend 4, profiles/calibration GUI 15.
+regressions 22, profiles/calibration backend 4, profiles/calibration GUI 15,
+device settings and lights 6, user folders 2.
 See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
@@ -252,6 +264,13 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
     instrument (7270 over Ethernet) answers `device.info`.
 
 ## Known limitations
+
+* Instruments now connect one after another at service start, so the start
+  takes a few seconds longer than before (all connected in parallel), and an
+  instrument that hangs while connecting delays the ones after it (up to its
+  60 s timeout).
+* Added stages are visible and controllable in Samba_controls; Samba_mini's
+  measurements use only the longitudinal and polar stages.
 
 * Server copies of data files and the server lab notebook (MiniMoke's
   `\\d.ethz.ch\...` archive) are not implemented; data stay local.

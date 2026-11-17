@@ -28,7 +28,9 @@ from core.theme import app_style
 from core.version import __version__
 from Samba_controls.panels import admin as admin_panel
 from Samba_controls.panels.admin import ConfigPanel, UsersPanel
+from Samba_controls.panels.device_editor import DeviceEditor
 from Samba_controls.panels.devices import DevicePanel, DeviceTable
+from Samba_controls.panels.lights import StartupLights
 from Samba_controls.process import ServiceProcess
 
 log = logging.getLogger("Samba_controls")
@@ -58,6 +60,12 @@ class ControlsWindow(QMainWindow):
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._poll)
         self._timer.start()
+        # Start-up lights: the public device list, also before anyone logs in.
+        self._dev_poll_busy = False
+        self._dev_timer = QTimer(self)
+        self._dev_timer.setInterval(1000)
+        self._dev_timer.timeout.connect(self._poll_devices)
+        self._dev_timer.start()
         if start_service:
             QTimer.singleShot(100, self._startup)
 
@@ -97,6 +105,8 @@ class ControlsWindow(QMainWindow):
         self.login_btn = QPushButton("Log in")
         h.addWidget(self.login_btn)
         root.addWidget(bar)
+        self.lights = StartupLights()
+        root.addWidget(self.lights)
 
         vs = QSplitter(Qt.Orientation.Vertical)
         hs = QSplitter(Qt.Orientation.Horizontal)
@@ -114,6 +124,8 @@ class ControlsWindow(QMainWindow):
         self.bottom.addTab(self.users, "Users")
         self.cfg = ConfigPanel(lambda: self.bridge)
         self.bottom.addTab(self.cfg, "Machine configuration")
+        self.devedit = DeviceEditor(lambda: self.bridge)
+        self.bottom.addTab(self.devedit, "Device settings")
         vs.addWidget(self.bottom)
         vs.setSizes([560, 260])
         root.addWidget(vs, 1)
@@ -130,6 +142,9 @@ class ControlsWindow(QMainWindow):
         self.control_btn.clicked.connect(self._toggle_control)
         self.force_btn.clicked.connect(self._force_release)
         self.table.selected.connect(self.panel.show_device)
+        self.lights.device_clicked.connect(self.table.select_device)
+        self.devedit.message.connect(self._msg)
+        self.devedit.saved.connect(self._offer_restart)
         for w in (self.panel, self.users, self.cfg):
             w.message.connect(self._msg)
         self.proc.output.connect(self._svc_line)
@@ -189,6 +204,7 @@ class ControlsWindow(QMainWindow):
             self._msg("warning", f"configuration: {p}")
         self._set_badge("STARTING…", "sim_badge")
         self.proc.start(mode)
+        self.lights.set_service_starting()
         self._we_started = True
 
     def _offer_minimoke_import(self) -> bool:
@@ -266,6 +282,7 @@ class ControlsWindow(QMainWindow):
 
     def _svc_exited(self, code: int) -> None:
         self._set_badge(f"SERVICE STOPPED (exit {code})", "offline_badge")
+        self.lights.set_service_stopped(f"service stopped (exit {code})")
         self.bridge.client.session = None
         self.bridge.client.lease_holder = False
         self.user_lbl.setText("not logged in")
@@ -365,7 +382,54 @@ class ControlsWindow(QMainWindow):
         if st.get("run_active") and run:
             self.status.setText(f"Measurement running: {run.get('workflow')} by {run.get('user')}")
 
+    def _poll_devices(self) -> None:
+        """Feed the start-up lights from the public device list (no login needed)."""
+        if self._dev_poll_busy or not self.isVisible():
+            return
+        c = self.bridge.client
+        self._dev_poll_busy = True
+
+        def ok(res):
+            self._dev_poll_busy = False
+            self.lights.update_devices(res)
+            if self.svc_badge.text().startswith("SERVICE STOPPED"):      # e.g. started from the console
+                sim = res.get("mode") == "simulation"
+                self._set_badge("SERVICE: SIMULATION" if sim else "SERVICE: REAL HARDWARE",
+                                "sim_badge" if sim else "real_badge")
+
+        def err(exc):
+            self._dev_poll_busy = False
+            if not self.proc.running:
+                self.lights.set_service_stopped("service not running")
+        call_async(lambda: c.call("server.devices", {}, 2.0), ok, err)
+
+    def _offer_restart(self) -> None:
+        if QMessageBox.question(self, "Device settings saved",
+                                "Restart the device service now so the new device settings apply?\n\n"
+                                "The instruments are disconnected (with the usual cleanup) and connect again "
+                                "one after another. Not possible while a measurement runs.") \
+                == QMessageBox.StandardButton.Yes:
+            self.restart_service()
+
+    def restart_service(self) -> bool:
+        """Stop the service cleanly, wait until it is gone, start it again (new settings)."""
+        if not self.stop_service():
+            return False
+        t0 = time.time()
+        while self.bridge.probe(0.5) is not None and time.time() - t0 < 60:
+            QApplication.processEvents()
+            time.sleep(0.2)
+        if self.bridge.probe(0.5) is not None:
+            self._msg("error", "The service did not stop within 60 s; not restarted.")
+            return False
+        self.start_service()
+        return True
+
     def _on_event(self, topic: str, body: dict) -> None:
+        if topic == "startup":
+            self.lights.on_startup(body)
+        elif topic.startswith("state."):
+            self.lights.on_state(body.get("device", ""), body.get("state", ""), body.get("status", ""))
         if topic.startswith("state."):
             self.table.set_state(body.get("device", ""), body.get("state", ""), body.get("status", ""))
             self.panel.on_state(body.get("device", ""), body.get("state", ""), body.get("status", ""))
@@ -389,6 +453,8 @@ class ControlsWindow(QMainWindow):
         w = self.bottom.widget(idx)
         if w is self.users:
             self.users.refresh()
+        elif w is self.devedit and not self.devedit.is_dirty():
+            self.devedit.refresh()
         elif w is self.cfg:
             self.cfg.refresh()
 

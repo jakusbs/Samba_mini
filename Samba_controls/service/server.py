@@ -38,7 +38,7 @@ from Samba_controls.service.worker import CancelToken
 log = logging.getLogger(__name__)
 
 #: Capabilities announced in ``server.hello`` (see core.client.ServiceClient.has_feature).
-SERVICE_FEATURES = ("calibration-records-1", "presets-atomic-1")
+SERVICE_FEATURES = ("calibration-records-1", "presets-atomic-1", "device-config-1", "startup-lights-1")
 
 
 class ServiceServer:
@@ -383,6 +383,8 @@ class ServiceServer:
         m["calibration.activate"] = ("auth", lambda s, p, r: self.accounts.activate_calibration(
             s.user_id, _str(p, "setup"), p.get("id") or None, p.get("sample_id")))
         m["config.get"] = ("auth", self._config_get)
+        m["config.save_devices"] = ("admin", self._config_save_devices)
+        m["server.devices"] = ("public", self._devices_brief)
 
     # ================================================================ handlers
     def _hello(self, s, p, r) -> dict:
@@ -677,8 +679,70 @@ class ServiceServer:
         return {"run_active": False, "cleanup_problems": problems}
 
     def _config_get(self, s, p, r) -> dict:
-        return {"path": str(self.cfg.path), "status": self.cfg.status, "problems": self.cfg.problems,
-                "data": self.cfg.snapshot(), "mode": self.cfg.mode}
+        """The configuration the service runs with (``data``) and the file on disk (``file``,
+        with its fingerprint for config.save_devices); they differ after a save until restart."""
+        from core.config import machine
+        path = self.cfg.path or machine.paths.machine_config_path()
+        on_disk = machine.peek(path)
+        return {"path": str(path), "status": self.cfg.status, "problems": self.cfg.problems,
+                "data": self.cfg.snapshot(), "mode": self.cfg.mode,
+                "file": on_disk.data, "file_status": on_disk.status, "file_problems": on_disk.problems,
+                "file_hash": machine.file_hash(path),
+                "restart_required": _device_part(on_disk.data) != _device_part(self.cfg.data),
+                "stage_drivers": dict(machine.STAGE_DRIVERS), "setup_stages": list(machine.SETUP_STAGES)}
+
+    def _config_save_devices(self, s, p, r) -> dict:
+        """Administrators: replace the device sections (daq, lockin, hall, stages) of machine.toml.
+        Everything else in the file is kept.  Refused (CONFLICT) when the file changed since the
+        caller read it (``base_hash``), or when Samba_mini's setup stages would be removed.  The
+        old file is backed up; the running service keeps its configuration until it restarts."""
+        from core.config import machine
+        devices = p.get("devices")
+        if not isinstance(devices, dict):
+            raise ServiceError(ErrorCode.BAD_REQUEST, "devices must be an object")
+        unknown = set(devices) - set(machine.DEVICE_SECTIONS) - {"stages"}
+        if unknown:
+            raise ServiceError(ErrorCode.INVALID_VALUE, f"not device sections: {', '.join(sorted(unknown))}")
+        path = self.cfg.path or machine.paths.machine_config_path()
+        if p.get("base_hash") is not None and p.get("base_hash") != machine.file_hash(path):
+            raise ServiceError(ErrorCode.CONFLICT, "machine.toml changed since it was read; reload and edit again")
+        current = machine.peek(path)
+        if current.status == "invalid":
+            raise ServiceError(ErrorCode.INVALID_STATE, "machine.toml is invalid; fix the file first: "
+                               + "; ".join(current.problems))
+        data = current.data
+        for sec in machine.DEVICE_SECTIONS:
+            if sec in devices:
+                if not isinstance(devices[sec], dict):
+                    raise ServiceError(ErrorCode.INVALID_VALUE, f"{sec} must be an object")
+                data[sec] = devices[sec]
+        if "stages" in devices:
+            stages = devices["stages"]
+            if not isinstance(stages, dict):
+                raise ServiceError(ErrorCode.INVALID_VALUE, "stages must be an object")
+            missing = [k for k in machine.SETUP_STAGES if k not in stages]
+            if missing:
+                raise ServiceError(ErrorCode.INVALID_VALUE, f"the {', '.join(missing)} stage is used by Samba_mini's "
+                                   "setups; disable it instead of removing it")
+            data["stages"] = stages
+        try:
+            saved = machine.save(data, path)
+        except machine.ConfigError as exc:
+            raise ServiceError(ErrorCode.INVALID_VALUE, str(exc)) from None
+        log.info("device configuration saved by %s (%s); applies after a service restart",
+                 s.user["username"], ", ".join(sorted(devices)))
+        return {"path": str(saved), "file_hash": machine.file_hash(saved), "restart_required": True}
+
+    def _devices_brief(self, s, p, r) -> dict:
+        """Public: names, display names, start order and states of the devices, and the start-up
+        progress (Samba_controls' lights work before anyone logs in).  No values, no settings."""
+        keys = ("name", "label", "kind", "physical", "simulated", "state", "status", "start_order", "enabled")
+        return {"startup": dict(self.host.startup), "mode": self.cfg.mode,
+                "devices": [{k: d.get(k) for k in keys} for d in self.host.summary()]}
+
+
+def _device_part(cfg: dict) -> dict:
+    return {k: cfg.get(k) for k in ("daq", "lockin", "hall", "stages")}
 
 
 #: auth-level methods that change state and are refused in read-only mode

@@ -91,6 +91,8 @@ class DeviceHost:
         self.run_info: dict | None = None
         self.run_devices: set[str] | None = None     # declared by the run; None = all locked
         self._last_poll: dict[tuple[str, str], float] = {}
+        #: progress of connect_all (Samba_controls' start-up lights)
+        self.startup: dict = {"active": False, "order": [], "current": None, "results": {}}
         self._stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         for d in devices:
@@ -173,21 +175,34 @@ class DeviceHost:
                 log.warning("disconnect before reconnect failed: %s", exc)
         return self.connect(name, timeout_s, cancel)
 
+    def start_sequence(self) -> list[str]:
+        """Enabled physical devices in the order they connect at start (``start_order``, then id)."""
+        devs = [d for d in self._devices.values() if d.PHYSICAL and self.enabled.get(d.name, True)]
+        return [d.name for d in sorted(devs, key=lambda d: (d.start_order, d.name))]
+
     def connect_all(self, timeout_s: float = 60.0) -> dict:
-        """Connect every enabled physical device in parallel (each on its own worker)."""
-        jobs = {}
-        for name, d in self._devices.items():
-            if d.PHYSICAL and self.enabled.get(name, True):
-                jobs[name] = self._workers[name].submit(d.connect, timeout_s, label="connect")
+        """Connect the enabled physical devices one after another, in ``start_sequence()`` order
+        (as TANGO's Astor starts its servers level by level).  Each device's state events
+        (INIT -> ON / FAULT) and a ``startup`` event after every step let Samba_controls show the
+        start as a row of lights.  A device that fails does not stop the others."""
+        order = self.start_sequence()
+        self.startup = {"active": True, "order": order, "current": None, "results": {}}
+        self.publish("startup", dict(self.startup))
         results = {}
-        for name, job in jobs.items():
+        for name in order:
+            self.startup["current"] = name
+            self.publish("startup", dict(self.startup))
             try:
+                job = self._workers[name].submit(self._devices[name].connect, timeout_s, label="connect")
                 self._workers[name].wait(job, timeout_s)
                 results[name] = "ON"
             except ServiceError as exc:
                 results[name] = f"{exc.code}: {exc.message}"
             except Exception as exc:  # noqa: BLE001
                 results[name] = str(exc)
+            self.startup["results"] = dict(results)
+        self.startup.update(active=False, current=None)
+        self.publish("startup", dict(self.startup))
         self._refresh_logical()
         return results
 
@@ -316,7 +331,9 @@ class DeviceHost:
         out = []
         for d in self._devices.values():
             w = self._workers.get(d.name)
-            out.append({"name": d.name, "kind": d.KIND, "physical": d.PHYSICAL, "simulated": d.simulated,
+            out.append({"name": d.name, "label": d.label, "start_order": d.start_order,
+                        "enabled": self.enabled.get(d.name, True),
+                        "kind": d.KIND, "physical": d.PHYSICAL, "simulated": d.simulated,
                         "state": d.state.value, "status": d.status, "last_error": d.last_error,
                         "busy": bool(w and w.busy), "busy_with": w.current_label if w else None,
                         "identity": d.identity})
