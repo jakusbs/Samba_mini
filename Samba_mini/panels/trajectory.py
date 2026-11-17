@@ -632,6 +632,52 @@ class TrajectoryPanel(QWidget):
     def all_params(self) -> dict:
         return {k: self.params(k) for k in WORKFLOWS}
 
+    def reset_defaults(self) -> None:
+        """Every workflow back to its defaults, X-sweep selected (the state of a new window)."""
+        self.blockSignals(True)
+        try:
+            self.set_workflow("x_sweep")
+            self._shared = {k: {} for k in WORKFLOWS}
+            for key in ("time", "b_sweep_dc", "b_sweep_lockin", "y_sweep", "x_sweep"):
+                self.set_params(key, WORKFLOWS[key].defaults())
+            for w in (self.time_move, self.f_move):
+                w.setChecked(False)
+            for w in (self.f_x, self.f_y):
+                w.setValue(0.0)
+            self.set_workflow("x_sweep")
+        finally:
+            self.blockSignals(False)
+        self._apply_mode()
+        self.workflow_changed.emit(self.current)
+        self.changed.emit()
+
+    def working_state(self) -> dict:
+        """The draft of every workflow plus the selected one (remembered per user and setup)."""
+        return {"workflow": self.current, "params": self.all_params()}
+
+    def apply_working_state(self, ws: dict | None) -> None:
+        """Restore ``working_state()`` output exactly; missing parts take the defaults."""
+        self.reset_defaults()
+        ws = ws or {}
+        params = ws.get("params") or {}
+        self.blockSignals(True)
+        try:
+            for key in ("time", "b_sweep_dc", "b_sweep_lockin", "y_sweep", "xy_sweep", "x_sweep"):
+                if isinstance(params.get(key), dict):
+                    self.set_params(key, params[key])
+            wf = ws.get("workflow")
+            # set_params of the selected workflow last, so its shared lock-in/coil/timing values
+            # are the ones in the widgets when it is selected
+            if wf in WORKFLOWS:
+                self.set_workflow(wf)
+                if isinstance(params.get(wf), dict):
+                    self.set_params(wf, params[wf])
+        finally:
+            self.blockSignals(False)
+        self._apply_mode()
+        self.workflow_changed.emit(self.current)
+        self.changed.emit()
+
     def metadata(self) -> dict:
         m = self.meta.get_values()
         m["sample"] = m["sample_id"] or "sample"          # RunRequest / file name

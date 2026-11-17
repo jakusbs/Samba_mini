@@ -289,8 +289,10 @@ def test_bd_calibration_per_setup_reaches_runs(qapp, service, tmp_path, monkeypa
     w.dir_edit.setText(str(tmp_path / "data"))
     cal = [-4.0, -2.5, -0.5, 1.0, 2.5, 4.5]
     w.bd_panel.load_calibration(cal)
-    w._bd_save(w.bd_panel.get_calibration())
-    assert w.plot1d._kerr_cal.ok                        # θ display follows the calibration
+    assert not w.plot1d._kerr_cal.ok                    # unsaved editor values drive nothing
+    assert w.bd_panel.save() is not None                # ③ Save (a record) ...
+    assert w.bd_panel.activate()                        # ... ④ Activate for this experiment
+    assert w.plot1d._kerr_cal.ok                        # θ display follows the active calibration
     w.set_setup("polar")
     assert w.bd_panel.get_calibration() == [0.0] * 6    # the other setup has none saved
     w.set_setup("longitudinal")

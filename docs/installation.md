@@ -126,6 +126,8 @@ Framework DLL), pylablib 1.4.5 and pytrinamic 0.2.23 with this hardware.
 * **Abort** stops at the next point (a running stage move is stopped) and
   keeps the data measured so far.
 * Users cannot log out or switch while a measurement runs.
+* What is saved automatically (preferences, per-setup draft and experiment) and what
+  only on request (configurations, λ/2 calibrations): [profiles-and-calibration.md](profiles-and-calibration.md).
 
 ## 5. Data
 
@@ -160,6 +162,8 @@ CSV for existing scripts: tick *Also export CSV*, or
 | "Controlled by …" | Another user holds control; ask them to release it, or an administrator uses *Force release…* (stops their run and cleans up). |
 | Lease stays *stopping previous owner's work* | An operation did not stop within `reconcile_wait_s`; check the setup, then an administrator uses *Force release…* (the state is then not verified by software). |
 | Warning "outputs could not be confirmed safe" | Cleanup failed or the service was unreachable: check coil current, lock-in output and stages by hand. |
+| BD Calibration / R / C say "the running device service is older" | Samba_mini was updated but the service still runs the previous version. When no measurement runs: Samba_controls → *Stop service*, then *Start service* (this also migrates the accounts database; see [profiles-and-calibration.md](profiles-and-calibration.md#5-migration-accounts-database-schema-1--2)). |
+| Status bar `Prefs: ⚠ NOT SAVED` | The last automatic save failed (service unreachable, session expired). Your changes are kept; the Profile tab shows the reason and *Retry*. After a session expiry, log in with the same account to get them back. |
 
 Logs: `%LOCALAPPDATA%\SambaMini\logs\service.log` (rotating).
 

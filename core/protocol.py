@@ -78,6 +78,7 @@ class ErrorCode:
     UNKNOWN_OPERATION = "UNKNOWN_OPERATION"
     INVALID_STATE = "INVALID_STATE"
     NOT_SUPPORTED = "NOT_SUPPORTED"
+    CONFLICT = "CONFLICT"            # name already taken / record changed or gone (nothing was written)
     INTERNAL = "INTERNAL"
 
 

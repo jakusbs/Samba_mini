@@ -120,7 +120,7 @@ class ScanWriter:
             raise StorageError(f"cannot initialise {self.path}: {exc}") from exc
 
     def add_static(self, name: str, values, unit: str = "", role: str = "", label: str = "",
-                   group: str = "data") -> None:
+                   group: str = "data", attrs: dict | None = None) -> None:
         """A dataset written once when the file is created (e.g. Samba's /data/calibration)."""
         if self._f is None:
             raise StorageError(f"{self.path} is not open")
@@ -129,6 +129,8 @@ class ScanWriter:
             ds.attrs["role"] = role
             ds.attrs["label"] = label
             ds.attrs["unit"] = unit
+            for k, v in (attrs or {}).items():
+                ds.attrs[k] = _attr(v)
             self._f.flush()
         except Exception as exc:
             raise StorageError(f"cannot write {group}/{name} to {self.path}: {exc}") from exc

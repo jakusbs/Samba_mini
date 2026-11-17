@@ -82,6 +82,10 @@ class RunRequest:
     #: Samba's λ/2 (BD) calibration: six mV values at ticks 0, 5, 10, 15, 20, 25 -> /data/calibration
     #: (all zeros = no calibration, not written, as in Samba)
     bd_calibration: list | None = None
+    #: The calibration record these values come from, frozen at the start of the run (id,
+    #: version, setup, sample, creator, mode, source, ...) -> /metadata bd_calibration_*; the
+    #: live display uses the same snapshot.  None = no calibration active.
+    bd_calibration_record: dict | None = None
 
 
 @dataclass
@@ -504,6 +508,15 @@ class ScanEngine:
             "service_instance": self.client.instance_id or "",
             "run_id": new_id(),
         }
+        rec = self.req.bd_calibration_record
+        cal_vals = [float(v) for v in (self.req.bd_calibration or [])]
+        used = len(cal_vals) == 6 and any(v != 0.0 for v in cal_vals)
+        metadata["bd_calibration_id"] = (rec or {}).get("id") or "" if used else ""
+        metadata["bd_calibration_version"] = int((rec or {}).get("version") or 0) if used else 0
+        metadata["bd_calibration_json"] = (dict(rec, values=cal_vals) if (rec and used) else
+                                           {"active": False} if not used else
+                                           {"values": cal_vals, "id": None,
+                                            "note": "values without a calibration record"})
         for k, v in (self.req.extra_metadata or {}).items():
             metadata.setdefault(str(k), v)            # never overrides the engine's own keys
         root = dict(root, scan_type=self.wf.scan_type, mode=self.mode)
@@ -511,8 +524,11 @@ class ScanEngine:
         self._writer.create()
         cal = [float(v) for v in (self.req.bd_calibration or [])]
         if len(cal) == 6 and any(v != 0.0 for v in cal):
+            rec = self.req.bd_calibration_record or {}
             self._writer.add_static("calibration", cal, unit="mV", role="calibration",
-                                    label="λ/2 calibration (ticks 0, 5, 10, 15, 20, 25)")
+                                    label="λ/2 calibration (ticks 0, 5, 10, 15, 20, 25)",
+                                    attrs={"calibration_id": rec.get("id") or "",
+                                           "calibration_version": int(rec.get("version") or 0)})
         self._log("info", f"Saving to {self.path}" + (" (SIMULATION)" if simulated else ""))
 
     def _write(self, index: tuple, values: dict, group: str = "data", count: bool = True) -> None:

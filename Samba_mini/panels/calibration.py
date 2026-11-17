@@ -22,7 +22,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                              QPushButton, QVBoxLayout, QWidget)
 
-from core.gui.bridge import call_async, error_text
+from core.gui.bridge import call_guarded, error_text
 from core.scan.channels import SENSORS
 from Samba_mini.panels.widgets import NoScrollComboBox, NoScrollDoubleSpinBox, NoScrollSpinBox
 STAGE_TITLES = {"longitudinal": "Longitudinal stage · Thorlabs Kinesis",
@@ -135,24 +135,37 @@ class ScanPlot(QWidget):
 
 
 class TimeScanBox(QGroupBox):
-    """The calibration time scan's own settings (Samba: "Time scan (this tab's own config)")."""
+    """The calibration time scan's own settings (Samba: "Time scan (this tab's own config)").
+
+    Everything the calibration acquisition applies is shown and edited here -- samples,
+    interval, integration time, the coil command and the lock-in settings -- so it never
+    depends on values parked in another tab.  "From Hardware box" copies the values currently
+    shown in the Trajectory tab's Hardware box."""
+    changed = pyqtSignal()
+    copy_requested = pyqtSignal()
+
+    #: key, label, unit, min, max, decimals, default (lock-in/coil defaults = the time scan's)
+    FIELDS = [("b", "Coil:", "V", -6.0, 6.0, 4, 0.0),
+              ("volt", "Ampl:", "V", 0.0, 5.0, 3, 0.0),
+              ("sensi", "Sens:", "V", 1e-9, 1.0, 9, 500e-6),
+              ("lockin_freq", "Freq:", "Hz", 1.0, 102000.0, 1, 1777.0),
+              ("time_const", "TC:", "s", 1e-5, 100.0, 5, 0.5),
+              ("phase", "Phase:", "deg", -180.0, 180.0, 2, 0.0)]
+    DEFAULTS = {"n": 300, "interval": 0.2, "acq_time": 0.1, **{f[0]: f[6] for f in FIELDS}}
 
     def __init__(self, parent=None):
-        super().__init__("Time scan — press Start in this tab", parent)
+        super().__init__("Calibration scan — press Start in this tab", parent)
         g = QGridLayout(self)
         g.setSpacing(4)
         self.n = NoScrollSpinBox()
         self.n.setRange(1, 1_000_000)
-        self.n.setValue(300)
         self.interval = NoScrollDoubleSpinBox()
         self.interval.setRange(1e-3, 3600.0)
         self.interval.setDecimals(3)
-        self.interval.setValue(0.2)
         self.interval.setSuffix(" s")
         self.acq = NoScrollDoubleSpinBox()
         self.acq.setRange(1e-4, 600.0)
         self.acq.setDecimals(4)
-        self.acq.setValue(0.1)
         self.acq.setSuffix(" s")
         g.setContentsMargins(6, 4, 6, 4)
         col = 0
@@ -168,27 +181,62 @@ class TimeScanBox(QGroupBox):
         self.total = QLabel("")
         self.total.setStyleSheet("color:#6c7086;font-size:10px;")
         g.addWidget(self.total, 0, col)
-        self.setToolTip("Press Start while this tab is open to run this time scan.\n"
-                        "Lock-in and coil settings come from the Trajectory tab's time scan; the stage does "
-                        "not move.\nSaved as ..._calibration.h5, which the BD Calibration tab's Fit & Import "
-                        "picks up.")
+        self.hw: dict[str, NoScrollDoubleSpinBox] = {}
+        for i, (key, label, unit, lo, hi, dec, _default) in enumerate(self.FIELDS):
+            sp = NoScrollDoubleSpinBox()
+            sp.setDecimals(dec)
+            sp.setRange(lo, hi)
+            sp.setSuffix(f" {unit}")
+            sp.setKeyboardTracking(False)
+            sp.setMinimumWidth(70)
+            r, c = divmod(i, 3)
+            g.addWidget(QLabel(label), 1 + r, 2 * c)
+            g.addWidget(sp, 1 + r, 2 * c + 1)
+            sp.valueChanged.connect(self.changed.emit)
+            self.hw[key] = sp
+        self.hw["b"].setToolTip("Coil command (DAQ output) applied during the calibration scan")
+        self.hw["sensi"].setToolTip("Rounded up to the next 7270 range at the start of the scan")
+        self.hw["time_const"].setToolTip("Rounded up to the next 7270 value at the start of the scan")
+        copy = QPushButton("From Hardware box")
+        copy.setToolTip("Copy the coil and lock-in values currently shown in the Trajectory tab's Hardware box")
+        copy.clicked.connect(self.copy_requested.emit)
+        g.addWidget(copy, 3, 0, 1, 3)
+        self.applied = QLabel("Applied by the scan when it starts; the stage does not move.")
+        self.applied.setWordWrap(True)
+        self.applied.setStyleSheet("color:#6c7086;font-size:10px;")
+        g.addWidget(self.applied, 4, 0, 1, 7)
+        self.setToolTip("Press Start while this tab is open to run this time scan with exactly these settings.\n"
+                        "Saved as ..._calibration.h5; when it completes it is fitted in the BD Calibration tab "
+                        "for review.")
         for w in (self.n, self.interval):
             w.valueChanged.connect(self._update_total)
-        self._update_total()
+        for w in (self.n, self.interval, self.acq):
+            w.valueChanged.connect(self.changed.emit)
+        self.reset()
 
     def _update_total(self, *_):
         self.total.setText(f"= {self.n.value() * self.interval.value():.1f} s")
 
     def values(self) -> dict:
-        return {"n": self.n.value(), "interval": self.interval.value(), "acq_time": self.acq.value()}
+        v = {"n": self.n.value(), "interval": self.interval.value(), "acq_time": self.acq.value()}
+        v.update({k: sp.value() for k, sp in self.hw.items()})
+        return v
 
     def load(self, v: dict) -> None:
-        for key, w in (("n", self.n), ("interval", self.interval), ("acq_time", self.acq)):
+        widgets = [("n", self.n), ("interval", self.interval), ("acq_time", self.acq)] + list(self.hw.items())
+        for key, w in widgets:
             if key in (v or {}):
+                w.blockSignals(True)
                 try:
                     w.setValue(type(w.value())(v[key]))
                 except (TypeError, ValueError):
                     pass
+                w.blockSignals(False)
+        self._update_total()
+        self.changed.emit()
+
+    def reset(self) -> None:
+        self.load(self.DEFAULTS)
 
 
 class DigitJog(QWidget):
@@ -348,6 +396,7 @@ class CalibrationPanel(QWidget):
         super().__init__(parent)
         self._bridge = bridge_getter
         self._setup = setup_getter
+        self._gen = 0                           # selection generation (bumped on setup/session change)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
         self.plot = ScanPlot()
@@ -410,14 +459,27 @@ class CalibrationPanel(QWidget):
         return f"stage_{self._setup()}"
 
     def update_setup(self) -> None:
+        """The selected setup (stage) changed: forget the shown positions and ignore every
+        position reply still on its way for the previous stage."""
+        self._gen += 1
         self.stage_title.setText(STAGE_TITLES.get(self._setup(), self._setup()))
         self.stage_box.setTitle(f"Stage positioning · {STAGE_TITLES.get(self._setup(), self._setup())}")
         for j in self.jogs.values():
             j.set_unknown()                      # the other stage's position must not be jogged from
 
+    def reset_session(self) -> None:
+        """Login, logout or session expiry: nothing shown belongs to the new session yet."""
+        self.update_setup()
+        self.timescan.reset()
+        self.plot.begin(0.0, "Press Start while this tab is open to run a calibration time scan")
+
     def _client(self):
         b = self._bridge()
         return b.client if b else None
+
+    def _current(self, gen: int, stage: str):
+        """Still the same selection (setup) as when a request was sent?"""
+        return lambda: gen == self._gen and stage == self._stage()
 
     def _cmd(self, device: str, command: str, quiet: bool = False, **args) -> None:
         c = self._client()
@@ -429,8 +491,10 @@ class CalibrationPanel(QWidget):
                 self.message.emit("info", f"{device}.{command}: done")
             self.refresh_positions()
 
-        call_async(lambda: c.device(device).command(command, **args), ok,
-                   lambda e: self.message.emit("error", f"{device}.{command}: {error_text(e)}"))
+        # Errors name the device, so they stay meaningful after a setup switch; a reply from an
+        # earlier login session is dropped (call_guarded).
+        call_guarded(c, lambda: c.device(device).command(command, **args), ok,
+                     lambda e: self.message.emit("error", f"{device}.{command}: {error_text(e)}"))
 
     def _jog(self, axis: str, delta_mm: float) -> None:
         self._cmd(self._stage(), "jog", quiet=True, axis=axis, delta_mm=delta_mm)
@@ -443,8 +507,8 @@ class CalibrationPanel(QWidget):
 
         def go():
             return {a: c.device(st).command("move_to", axis=a, position_mm=v) for a, v in targets.items()}
-        call_async(go, lambda r: self.refresh_positions(),
-                   lambda e: self.message.emit("error", f"move: {error_text(e)}"))
+        call_guarded(c, go, lambda r: self.refresh_positions(),
+                     lambda e: self.message.emit("error", f"{st} move: {error_text(e)}"))
 
     def _set_zero(self) -> None:
         if QMessageBox.question(self, "Set zero", "Make the current position the software zero of all axes?"
@@ -457,8 +521,9 @@ class CalibrationPanel(QWidget):
         if c is None or not c.session:
             return
         st = self._stage()
-        call_async(lambda: c.device(st).read("x_mm", "y_mm", "z_mm"), self._show_positions,
-                   lambda e: [j.set_unknown() for j in self.jogs.values()])
+        valid = self._current(self._gen, st)
+        call_guarded(c, lambda: c.device(st).read("x_mm", "y_mm", "z_mm"), self._show_positions,
+                     lambda e: [j.set_unknown() for j in self.jogs.values()], still_valid=valid)
 
     def _show_positions(self, readings) -> None:
         for ax in ("x", "y", "z"):
@@ -468,4 +533,7 @@ class CalibrationPanel(QWidget):
     def set_position(self, axis: str, value, quality: str = "") -> None:
         j = self.jogs.get(axis)
         if j is not None:
-            j.set_position(value, quality == "SIMULATED")
+            if quality == "INVALID":
+                j.set_unknown()                  # no reading: nothing to jog from
+            else:
+                j.set_position(value, quality == "SIMULATED")

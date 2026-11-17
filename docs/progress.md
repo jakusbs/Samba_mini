@@ -122,12 +122,28 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   login dialog never open behind the splash.  Artwork built from Samba's
   `samba_splash.svg` (`scripts\make_splash.py`); checked on this PC's screen.
 
+* 2026-11-17 — **Profiles, saved state, calibration records, device-panel
+  races** (branch `fix/profiles-calibration-device-state`, from `main` at
+  `973a012`, after PR #3).  Account switching resets/restores every
+  user-owned widget deterministically; preferences and per-setup working
+  state autosave with visible status; configurations are recipes only, with
+  atomic rename/copy and collision checks; λ/2 calibrations are versioned
+  records (accounts schema 2, migrated with a backup) used through Acquire →
+  Fit & review → Save → Activate and frozen per run (file and live display
+  share the snapshot); the calibration scan has its own visible settings;
+  delayed replies are tied to the session and selection (Calibration-tab
+  stage reads, Samba_controls device panel).  Details:
+  [profiles-and-calibration.md](profiles-and-calibration.md).  Simulation and
+  fake drivers only; the running real-mode service on the PC was not touched
+  (work done in a separate worktree).
+
 ## Tests
 
-`scripts\run_tests.bat` → **81 passed** (≈95 s) on the measurement PC,
-simulation and fake drivers only.  Per area: service 16, engine 13, drivers
-14, core 16, recovery 4, process 2, GUI 16.  See the README table for what each
-covers.
+`scripts\run_tests.bat` → **122 passed** (≈130 s, 2026-11-17) on the
+measurement PC, simulation and fake drivers only.  Per area: service 16,
+engine 13, drivers 14, core 16, recovery 4, process 2, GUI 16, review
+regressions 22, profiles/calibration backend 4, profiles/calibration GUI 15.
+See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,
 Data Browser, 2D map, device readbacks, manual controls), and Samba_mini
@@ -224,6 +240,16 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
    a run → coil 0 V, oscillator 0 V, stage stopped).
 9. **Parity run:** one short measurement of each workflow compared with
    MiniMoke on the same sample.
+10. **Profiles and calibration on the real setup** (after restarting the
+    service with this version): check the schema-2 migration of the existing
+    accounts database (backup written, saved calibrations shown as
+    *migrated*, sample/mode unknown, still active); log in as two operators
+    in turn and confirm nothing of the first shows for the second and that
+    logging in moves nothing; run a real calibration scan with the
+    calibration box's lock-in/coil values, check the automatic fit, Save,
+    Activate, and that the next file's `/metadata bd_calibration_*` and the θ
+    display match; in Samba_controls, switch devices quickly while a slow
+    instrument (7270 over Ethernet) answers `device.info`.
 
 ## Known limitations
 
@@ -231,9 +257,14 @@ energises.  Close MiniMoke, Kinesis and TMCL-IDE first.
   `\\d.ethz.ch\...` archive) are not implemented; data stay local.
 * Application icons are derived from Samba's dancer artwork (same lab) with a
   badge per app (`scripts\make_icons.py`); replace `assets\*.ico` to rebrand.
-* The θ (µrad) display needs a λ/2 calibration: enter or fit it in the BD
-  Calibration tab (Fit & Import expects a time scan from a configuration
-  named "calibration" while the plate is stepped through ticks 0–25).
+* The θ (µrad) display needs an *active* λ/2 calibration: acquire it in the
+  Calibration tab (the finished scan is fitted in the BD Calibration tab), or
+  Fit & Import a calibration time scan, then Save and Activate.  Calibrations
+  are per account; there is no sharing between accounts yet.
+* A configuration loaded while another one has unsaved changes asks first;
+  replacing an unsaved draft that belongs to *no* configuration does not
+  (that draft is still the autosaved working state until a configuration is
+  loaded over it).
 * Scanlist field flip reverses the coil command; the field_T column is the
   scan's median Hall reading.  There is no relay on these setups
   (relay_sign is always +1).

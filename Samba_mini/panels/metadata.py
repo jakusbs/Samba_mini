@@ -181,6 +181,28 @@ class MetadataGroup(QGroupBox):
         self.incidence_combo.setToolTip("The polar setup measures PMOKE only" if incidence else "")
 
     # ------------------------------------------------------------------ values
+    def reset(self, operator: str = "") -> None:
+        """Explicit defaults (a new user / setup without a remembered experiment).  The
+        incidence stays locked to PMOKE on the polar setup."""
+        locked = not self.incidence_combo.isEnabled()
+        for le in (self.meta_sample, self.meta_device, self.meta_notes, self.pol_custom):
+            le.setText("")
+        self.meta_operator.setText(operator or "")
+        for sp in (self.r4w_spin, self.r2w_spin, self.tfm_spin, self.tstack_spin):
+            sp.setValue(0.0)
+        self._inc_loading = True
+        try:
+            if not locked:
+                self.incidence_combo.setCurrentText("LMOKE")
+            self._shift_by_inc = {inc: DEFAULT_MIRROR_SHIFT for inc in INCIDENCES}
+            self._cur_inc = self.incidence_combo.currentText()
+            self.mirror_shift.setValue(DEFAULT_MIRROR_SHIFT)
+        finally:
+            self._inc_loading = False
+        self.pol_combo.setCurrentText("s")
+        for cb in (self.lam2_cb, self.lam4_cb, self.nodc_cb):
+            cb.setChecked(False)
+
     def get_values(self) -> dict:
         pol = self.pol_combo.currentText()
         if pol == "other":
@@ -217,6 +239,20 @@ class MetadataGroup(QGroupBox):
                         ("device_id", self.meta_device), ("notes", self.meta_notes)):
             if key in cfg:
                 le.setText(str(cfg[key]))
+        if "mirror_shift_by_incidence" in cfg and not ("incidence" in cfg and self.incidence_combo.isEnabled()):
+            saved = cfg.get("mirror_shift_by_incidence") or {}
+            self._shift_by_inc = {i: float(saved.get(i, DEFAULT_MIRROR_SHIFT)) for i in INCIDENCES}
+            if "mirror_shift" not in cfg:
+                self._inc_loading = True
+                try:
+                    self.mirror_shift.setValue(self._shift_by_inc[self.incidence_combo.currentText()])
+                finally:
+                    self._inc_loading = False
+        if "mirror_shift" in cfg and not ("incidence" in cfg and self.incidence_combo.isEnabled()):
+            try:                                 # incidence locked (polar): the shift still loads
+                self.mirror_shift.setValue(float(cfg["mirror_shift"]))
+            except (TypeError, ValueError):
+                pass
         if "incidence" in cfg and self.incidence_combo.isEnabled():
             inc = cfg["incidence"]
             self._inc_loading = True
