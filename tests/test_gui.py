@@ -160,7 +160,8 @@ def test_samba_mini_xy_map_ui(qapp, service, tmp_path):
     w.dir_edit.setText(str(tmp_path / "data"))
     w.trajectory.set_workflow("xy_sweep")
     w.trajectory.set_params("xy_sweep", {"x_min": 0, "x_max": 20, "x_step": 10, "y_min": 0, "y_max": 20,
-                                         "y_step": 10, "acq_time": 0.005, "time_const": 0.1})
+                                         "y_step": 10, "acq_time": 0.005, "time_const": 0.1,
+                                         "settle_time": 0.0})       # no 1 s wait at every point
     w.start_run()
     assert wait_until(qapp, lambda: w.engine.result is not None, 60)
     assert w.engine.result["status"] == "completed"
@@ -188,7 +189,7 @@ def test_a_run_locks_only_what_it_depends_on(qapp, service, tmp_path):
     t = w.trajectory
     t.set_workflow("xy_sweep")
     t.set_params("xy_sweep", {"x_min": -20, "x_max": 20, "x_step": 10, "y_min": 0, "y_max": 30,
-                              "y_step": 10, "acq_time": 0.02, "time_const": 0.1})
+                              "y_step": 10, "acq_time": 0.02, "time_const": 0.1, "settle_time": 0.0})
     t.meta.meta_sample.setText("S-before")
     w.scanlist.n_scans.setValue(2)
     w.bottom_tabs.setCurrentWidget(w.scanlist)
@@ -434,7 +435,8 @@ def test_data_browser_opens_a_running_xy_map_without_crashing(qapp, service, tmp
     w.dir_edit.setText(str(tmp_path / "data"))
     w.trajectory.set_workflow("xy_sweep")
     w.trajectory.set_params("xy_sweep", {"x_min": -20, "x_max": 20, "x_step": 10, "y_min": 0, "y_max": 30,
-                                         "y_step": 10, "acq_time": 0.02, "time_const": 0.1, "repeat_num": 1})
+                                         "y_step": 10, "acq_time": 0.02, "time_const": 0.1, "repeat_num": 1,
+                                         "settle_time": 0.0})
     w.start_run()
     assert wait_until(qapp, lambda: w._progress[0] >= 3, 60)
     w.bottom_tabs.setCurrentWidget(w.browser)           # what the user did, mid-measurement
@@ -449,6 +451,7 @@ def test_data_browser_opens_a_running_xy_map_without_crashing(qapp, service, tmp
             running = it.value()
         it += 1
     assert running is not None
+    assert w.engine.result is None                      # still measuring: the map is partly filled
     w.browser.tree.setCurrentItem(running)              # selecting the file being written
     for _ in range(5):
         qapp.processEvents()
