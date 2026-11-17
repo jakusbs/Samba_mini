@@ -169,6 +169,55 @@ def test_samba_mini_xy_map_ui(qapp, service, tmp_path):
     w.close()
 
 
+def test_a_run_locks_only_what_it_depends_on(qapp, service, tmp_path):
+    """During a measurement only the choice of measurement, setup, account, channels and (in a
+    scanlist) the scanlist settings are greyed; positions, timing, metadata, hardware values and
+    the configuration list stay usable for the next one.  A scanlist keeps the metadata and
+    parameters it started with although the fields are edited meanwhile."""
+    from core.gui.bridge import ServiceBridge
+    from core.storage.hdf5_writer import read_file
+    from Samba_mini.app import MainWindow
+    service.client("boot").bootstrap(*ADMIN)
+    bridge = ServiceBridge("Samba_mini", service.rpc_port, service.event_port)
+    w = MainWindow(bridge, auto_login=False)
+    w.show()
+    bridge.probe()
+    bridge.client.login(*ADMIN)
+    w._after_login()
+    w.dir_edit.setText(str(tmp_path / "data"))
+    t = w.trajectory
+    t.set_workflow("xy_sweep")
+    t.set_params("xy_sweep", {"x_min": -20, "x_max": 20, "x_step": 10, "y_min": 0, "y_max": 30,
+                              "y_step": 10, "acq_time": 0.02, "time_const": 0.1})
+    t.meta.meta_sample.setText("S-before")
+    w.scanlist.n_scans.setValue(2)
+    w.bottom_tabs.setCurrentWidget(w.scanlist)
+    w.start_run()                                        # the Scanlist tab is open: a scanlist
+    assert wait_until(qapp, lambda: w._sl is not None and w._progress[0] >= 2, 60)
+    locked = [*t.type_btns, t.x_grp.scan_cb, t.y_grp.scan_cb, t.rb_li, t.rb_dc, w.start_btn, w.login_btn,
+              *w.setup_btns.values(), w.scanlist.n_scans, w.scanlist.name]
+    assert not any(x.isEnabled() for x in locked)
+    free = [t.stack, t.monitor, t.x_grp.start, t.x_grp.stop, t.y_grp.step, t.timing, t.meta, t.meta.meta_sample,
+            t.hardware.coil, w.config_list]
+    assert all(x.isEnabled() for x in free)
+    assert not t.run_note.isHidden()                     # (its tab is behind the Scanlist tab)
+    w._load_config(w.setup, "another")                   # would switch type / channels: refused, said why
+    assert "not loaded" in w.config_list.status.text()
+    t.meta.meta_sample.setText("S-after")                # preparing the next measurement
+    t.x_grp.stop.setValue(40)
+    assert wait_until(qapp, lambda: w._sl is None and w.start_btn.isEnabled(), 180)
+    paths = [w.scanlist.table.item(i, 4).text() for i in range(2)]
+    assert all(paths)
+    for p in paths:                                      # both scans: the values at Start
+        f = read_file(p)
+        assert f["metadata"]["sample_id"] == "S-before"
+        assert np.nanmax(f["data"]["actuator_x_setpoint"]["values"]) == 20
+    assert all(x.isEnabled() for x in [*t.type_btns, t.x_grp.scan_cb, w.scanlist.n_scans])
+    assert t.run_note.isHidden()
+    assert t.params()["x_max"] == 40 and t.metadata()["sample_id"] == "S-after"   # the edits stay
+    w.close()
+
+
 ROUND_TRIP = {"b_min": -0.3, "b_max": 0.45, "b_step": 0.015, "sweep_freq": 0.05, "num_sweeps": 3, "x": 12.5,
               "y": -7.25, "position_stage": False, "volt": 0.75, "sensi": 2e-4, "lockin_freq": 2345.6,
               "time_const": 0.2, "phase": 12.5, "acq_time": 0.3, "x_min": -20.0, "x_max": 30.0, "x_step": 2.5,

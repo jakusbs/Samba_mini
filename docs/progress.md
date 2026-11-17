@@ -215,11 +215,28 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   per 5 min with the number of overloaded replies, and "no overload" only
   after a minute without one.  Fake drivers only.
 
+* 2026-11-17 — **XY map without zigzag, fewer greyed controls during a run**
+  (branch `feature/xy-raster-live-ui`, from `main` at `b4fae7b`).  An XY map
+  is still measured column by column with Y as the fast axis, but Y now runs
+  from the most negative to the most positive Y in every column (no zigzag,
+  whichever way From / To y are entered; MiniMoke ran Y serpentine), X steps
+  between columns.  The file is laid out as before (`[n_y, n_x]`, Y
+  ascending); `/metadata scan_order` records the order.  During a run Samba_mini now
+  greys only what the run depends on: Start, setup, account, the measured
+  channels, the stage when the run moves it, the choice of measurement
+  (Spatial / Field, scanned axes, lock-in or DC sweep) and, during a scanlist,
+  the scanlist settings.  Positions, field, timing, metadata, the Hardware
+  values, the field monitor and the configuration list stay usable to prepare
+  the next measurement (a note says so); loading a configuration waits until
+  the run has ended.  A scanlist keeps the metadata and configuration name it
+  started with (previously re-read from the fields before each scan).
+  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **155 passed** (≈200 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **157 passed** (≈270 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
-engine 13, drivers 17, core 16, recovery 4, process 2, GUI 16, review
+engine 14, drivers 17, core 16, recovery 4, process 2, GUI 17, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 16,
 device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4,
 settle/calibration box/units 7, stuck control 4.

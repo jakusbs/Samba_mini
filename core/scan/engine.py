@@ -936,6 +936,9 @@ class ScanEngine:
         p = self.params
         if self.wf.key == "xy_sweep":
             pts, xs, ys = self._position_points()
+            # Point order matters for drift: maps before this ran Y serpentine (up, down, up, ...).
+            self._writer.set_metadata(scan_order="columns, Y fast from negative to positive (no zigzag), "
+                                                 "X stepped from x_min to x_max")
         else:
             pts, values = self._position_points()
         record_hall = self.read_hall
@@ -996,7 +999,7 @@ class ScanEngine:
                 vals.update({"actuator_x_setpoint": pt.x_um, "actuator_x": read_x,
                              "actuator_y_setpoint": pt.y_um, "actuator_y": read_y})
                 self._write((pt.iy, pt.ix), vals, group)
-                if pt.iy in (0, len(ys) - 1):
+                if pt.iy == len(ys) - 1:                 # a column is complete
                     self._writer.checkpoint()
             else:
                 ax = "x" if self.wf.key == "x_sweep" else "y"

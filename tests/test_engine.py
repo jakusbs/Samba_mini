@@ -94,6 +94,21 @@ def test_too_fast_dc_sweep_rejected_like_minimoke(admin_client, tmp_path):
     assert res["path"] is None
 
 
+def test_xy_map_scans_columns_y_negative_to_positive():
+    """XY map: Y is the fast axis and every column runs from the most negative to the most positive
+    Y -- the same direction in every column, no zigzag -- whichever way From / To y are entered;
+    X steps between columns."""
+    pts, xs, ys = plans.xy_points(0, 20, 10, 20, -20, 10, 0.1, 1)       # "From y" > "To y" on purpose
+    assert list(xs) == [0, 10, 20] and list(ys) == [-20, -10, 0, 10, 20]
+    assert [(p.x_um, p.y_um) for p in pts] == [(x, y) for x in (0, 10, 20) for y in (-20, -10, 0, 10, 20)]
+    assert all(xs[p.ix] == p.x_um and ys[p.iy] == p.y_um for p in pts)    # (ix, iy) = the map cell
+    assert [p.loop for p in pts[::5]] == [0, 1, 2]                          # one loop per column
+    gx, gy = plans.xy_axes(0, 20, 10, 20, -20, 10)                          # the live map's grid
+    assert np.array_equal(gx, xs) and np.array_equal(gy, ys)
+    rep, *_ = plans.xy_points(0, 20, 10, -20, 20, 10, 0.1, 2)
+    assert len(rep) == 30 and [p.rep for p in rep[14:16]] == [0, 1] and rep[15].y_um == -20
+
+
 @pytest.mark.parametrize("workflow,params,shape", [
     ("x_sweep", dict(x_min=0, x_max=20, x_step=10, y=0, b=0.3, repeat_num=1, settle_time=0.0,
                      field_settle_s=0.01, record_hall=True), (2, 3)),
@@ -114,6 +129,9 @@ def test_position_sweeps(admin_client, tmp_path, workflow, params, shape):
         assert f["attrs"]["_is_2d"]
         assert np.allclose(f["data"]["actuator_x_setpoint"]["values"][0], [0, 10, 20])
         assert np.allclose(f["data"]["actuator_y"]["values"][:, 0], [0, 10], atol=1e-6)
+        # measured column by column, Y bottom to top in every column
+        assert [(p["ix"], p["iy"]) for p in points] == [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]
+        assert "Y fast" in f["metadata"]["scan_order"]
     if workflow == "y_sweep":
         assert np.all(np.isnan(f["data"]["hall_field"]["values"]))      # not recorded -> NaN
         assert np.allclose(f["data"]["position_x"]["values"], 5.0, atol=1e-6)

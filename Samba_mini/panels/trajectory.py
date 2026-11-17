@@ -380,6 +380,11 @@ class TrajectoryPanel(QWidget):
         root.setSpacing(6)
         type_row, self.scan_bg, self.type_btns = segmented_pills(["Spatial", "Field"], self)
         type_row.addStretch()
+        self.run_note = QLabel("A measurement is running with the values it started with — "
+                               "changes here are for the next one.")
+        self.run_note.setStyleSheet("color:#fab387;font-size:11px;")
+        self.run_note.setVisible(False)
+        type_row.addWidget(self.run_note)
         root.addLayout(type_row)
 
         # ---------------------------------------------------------- spatial page
@@ -689,15 +694,13 @@ class TrajectoryPanel(QWidget):
         self.meta.fix_incidence("PMOKE" if setup == "polar" else None)
 
     def set_editable(self, editable: bool) -> None:
-        for b in self.type_btns:
-            b.setEnabled(editable)
-        self.stack.setEnabled(editable)
-        self.timing.setEnabled(editable)
-        self.meta.setEnabled(editable)
-        for sp in list(self.hardware.li.values()) + [self.hardware.coil]:
-            sp.setEnabled(editable and (sp is self.hardware.coil or self.workflow().uses_lockin))
-        if editable:
-            self._apply_mode()
+        """During a run only the choice of measurement is locked (Spatial / Field, the scanned
+        axes, lock-in or DC sweep): the live plots and the channel list are laid out for it.
+        Positions, field, timing, metadata and the hardware values stay editable -- the run keeps
+        the values it started with, the edits are for the next measurement."""
+        for w in (*self.type_btns, self.x_grp.scan_cb, self.y_grp.scan_cb, self.rb_li, self.rb_dc):
+            w.setEnabled(editable)
+        self.run_note.setVisible(not editable)
 
     def add_field_reading(self, value) -> None:
         self.monitor.add(value)
