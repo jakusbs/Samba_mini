@@ -265,11 +265,20 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   same service (forced release, expiry) still ends the scan.  Samba_controls
   no longer logs out when its service exits.  Simulation only.
 
+* 2026-11-18 — **Samba_controls responsive with the service stopped** (branch
+  `fix/controls-lag-without-service`).  Since logins survive a restart,
+  Samba_controls keeps its login when the service exits; tab changes then
+  asked the stopped service (10 s timeout each) and closing the window waited
+  30 s for the logout.  While the service does not answer (no reply to the
+  device lights' poll, or the service this window started has exited) the
+  tabs are not refreshed, the status poll pauses and closing skips the
+  logout.  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **166 passed** (≈210 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **167 passed** (≈210 s, 2026-11-18) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
-engine 14, drivers 17, core 17, recovery 10, process 2, GUI 17, review
+engine 14, drivers 17, core 17, recovery 10, process 2, GUI 18, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 16,
 device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4,
 settle/calibration box/units 7, stuck control 6.
