@@ -28,6 +28,7 @@ from core import protocol
 from core.config.machine import MachineConfig
 from core.model import DevState
 from core.protocol import ErrorCode, ServiceError
+from core.scan.workflows import RESUMABLE_AFTER_SERVICE_STOP
 from core.version import PROTOCOL, describe, software_revision
 from Samba_controls.service.auth import AccountStore, SessionManager
 from Samba_controls.service.devices.base import CallContext
@@ -56,11 +57,15 @@ class ServiceServer:
         self.started = time.time()
         self.control_token = control_token
         self.accounts = AccountStore(accounts_path)
-        self.sessions = SessionManager(float(self.backend_cfg["session_idle_timeout_s"]))
+        # Sessions survive a service restart (a token hash per session in the state folder).
+        self.sessions = SessionManager(float(self.backend_cfg["session_idle_timeout_s"]),
+                                       Path(state_dir) / "sessions.json", self.accounts.get_user)
         self._out: "queue.Queue[tuple]" = queue.Queue()
         self._ctx = zmq.Context()
         self._tls = threading.local()
         self._control_lock = threading.RLock()
+        self._requests: dict[object, tuple] = {}     # requests being handled: key -> (ident, id)
+        self._requests_lock = threading.Lock()
         self._release_lock = threading.Lock()        # one holder release at a time (keep_outputs)
         self._release_keep: set[str] = set()
         self._inflight: dict[str, set[str]] = {}
@@ -151,7 +156,22 @@ class ServiceServer:
                 self._flush_out()
         finally:
             self._flush_out()
+            self._answer_stopping()
             self._teardown()
+
+    def _answer_stopping(self) -> None:
+        """Answer the requests still being handled with "the service is stopping" before the
+        teardown: a client waiting for a long call (a point, a move: up to 2 min) learns it at
+        once, and a map scan pauses instead of waiting out the timeout."""
+        with self._requests_lock:
+            pending = list(self._requests.values())
+        err = ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "the device service is stopping",
+                           {"service_stopping": True})
+        for ident, rid in pending:
+            try:
+                self._router.send_multipart([*ident, protocol.dumps(protocol.make_error(rid, err))])
+            except zmq.ZMQError:
+                pass
 
     def _flush_out(self) -> None:
         while True:
@@ -190,7 +210,14 @@ class ServiceServer:
             rid = req["id"]
             req["_deadline"] = (received_at if received_at is not None else time.monotonic()) + req["timeout_s"]
             req["_received_lease"] = lease_generation
-            result = self.dispatch(req)
+            key = object()
+            with self._requests_lock:
+                self._requests[key] = (ident, rid)
+            try:
+                result = self.dispatch(req)
+            finally:
+                with self._requests_lock:
+                    self._requests.pop(key, None)
             reply = protocol.make_reply(rid, result)
         except ServiceError as exc:
             reply = protocol.make_error(rid, exc)
@@ -216,7 +243,17 @@ class ServiceServer:
             log.info("read-only mode: shutdown cleanup skipped (nothing was written)")
             problems = []
         else:
-            problems = self.host.cleanup_all(self.cfg.data.get("cleanup"))
+            cleanup = dict(self.cfg.data.get("cleanup") or {})
+            run = self.host.run_info or {}
+            if self.host.run_active and run.get("workflow") in RESUMABLE_AFTER_SERVICE_STOP:
+                # Samba_mini pauses the map scan and continues it once the service runs again:
+                # leave the field and the lock-in as they are (stages stop as usual).
+                cleanup["zero_coil"] = False
+                cleanup["lockin_output_off"] = False
+                log.warning("stopping during a %s by %s: coil and lock-in output left on, so the scan can "
+                            "continue after the restart (Resume in Samba_mini)", run.get("workflow"),
+                            run.get("user"))
+            problems = self.host.cleanup_all(cleanup)
         if problems:
             log.error("cleanup problems at shutdown: %s", problems)
         self.host.shutdown()
@@ -240,11 +277,12 @@ class ServiceServer:
                 log.exception("lease watchdog")
 
     # ================================================================ reconcile
-    def _reconnect_faulted(self, cleanup: dict) -> list[str]:
-        """Before an administrator's forced cleanup: reconnect the devices the cleanup needs that
-        are faulted.  Nobody can reconnect them otherwise while the lease is RECONCILING (a
-        reconnect needs the lease), so without this one faulted device kept the setup blocked
-        until the service was restarted (17 Nov)."""
+    def _reconnect_faulted(self, cleanup: dict, reason: str) -> list[str]:
+        """Before the cleanup when control ends (released, lost or forced): reconnect the devices
+        the cleanup needs that are faulted.  Nobody can reconnect them otherwise while the lease is
+        RECONCILING (a reconnect needs the lease), so one faulted device kept the setup blocked
+        until the service was restarted (17 Nov) -- and, after a release, until an administrator
+        forced it (17 Nov, a DAQ task stuck at -200560).  A reconnect writes no outputs."""
         names = []
         if cleanup.get("stop_stages", True):
             names += [n for n, d in self.host._devices.items() if d.KIND == "stage"]
@@ -257,12 +295,12 @@ class ServiceServer:
             d = self.host._devices.get(name)
             if d is None or not d.PHYSICAL or d.state != DevState.FAULT:
                 continue
-            log.warning("forced release: reconnecting faulted %s before the cleanup", name)
+            log.warning("%s: reconnecting faulted %s before the cleanup", reason, name)
             try:
                 self.host.reconnect(name, 60.0)
                 done.append(name)
             except ServiceError as exc:
-                log.error("forced release: %s could not be reconnected: %s", name, exc.message)
+                log.error("%s: %s could not be reconnected: %s", reason, name, exc.message)
         return done
 
     def _reconcile(self, reason: str) -> dict:
@@ -281,8 +319,15 @@ class ServiceServer:
                 cleanup["zero_coil"] = False
             if "lockin" in keep:
                 cleanup["lockin_output_off"] = False
-        reconnected = self._reconnect_faulted(cleanup) if forced and stopped else []
+        reconnected = self._reconnect_faulted(cleanup, reason) if stopped else []
         problems += self.host.cleanup_all(cleanup)
+        if stopped and problems:
+            # A device may fault only in the cleanup itself (a stuck DAQ task cannot zero the
+            # coil): reconnect it and run the cleanup once more.
+            again = self._reconnect_faulted(cleanup, reason)
+            if again:
+                reconnected += [n for n in again if n not in reconnected]
+                problems = self.host.cleanup_all(cleanup)
         self.host.run_active = False
         self.host.run_info = None
         self.host.run_devices = None

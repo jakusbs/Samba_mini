@@ -90,10 +90,12 @@ class SimDaq(DaqBase):
         self.physics = physics or SimPhysics()
         self.identity.update({"model": "Simulated DAQ", "driver": "sim"})
         self._started: dict | None = None
+        self._stuck = False         # "daq.stuck": every acquisition fails until a reconnect
 
     def _hw_open(self):
         if self.physics.should_fail("daq.connect"):
             raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "simulated: DAQ not found")
+        self._stuck = False
 
     def _hw_close(self):
         pass
@@ -114,6 +116,11 @@ class SimDaq(DaqBase):
         if st is None:
             raise ServiceError(ErrorCode.DEVICE_FAULT, "simulated DAQ: no task running")
         duration = n / self.rate
+        if self.physics.should_fail("daq.stuck"):
+            self._stuck = True
+        if self._stuck:     # as the NI driver: a plain exception, not a ServiceError
+            raise RuntimeError("simulated: Wait Until Done did not indicate that the task was done "
+                               "within the specified timeout (-200560)")
         hang = self.physics.should_fail("daq.hang")
         remaining = (st["t0"] + duration) - time.perf_counter()
         if hang or remaining > timeout_s:
@@ -134,6 +141,9 @@ class SimDaq(DaqBase):
         return balanced, intensity
 
     def _hw_static(self, values, timeout_s):
+        if self._stuck:
+            raise RuntimeError("simulated: set_outputs: Wait Until Done did not indicate that the task "
+                               "was done within the specified timeout (-200560)")
         self.physics.set_coil(float(values[2]))
 
     def _hw_stop(self):

@@ -15,6 +15,7 @@ other processes of the same Windows user.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -609,8 +610,11 @@ def _public_calibration(row) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Sessions (in memory; a backend restart requires a new login)
+# Sessions (kept in a file next to the service state: a service restart keeps everybody logged in)
 # ---------------------------------------------------------------------------
+
+SAVE_LAST_SEEN_EVERY_S = 60.0   # how stale a session's saved "last seen" may get (idle timeout: hours)
+
 
 @dataclass
 class Session:
@@ -619,6 +623,7 @@ class Session:
     client: str
     created: float = field(default_factory=time.monotonic)
     last_seen: float = field(default_factory=time.monotonic)
+    saved_seen: float = field(default_factory=time.time)     # wall clock of the saved "last seen"
 
     @property
     def user_id(self) -> int:
@@ -633,41 +638,138 @@ class Session:
                 "session_id": self.token[:8]}
 
 
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 class SessionManager:
-    def __init__(self, idle_timeout_s: float = 12 * 3600):
+    """Login sessions.  With a *path* they survive a service restart: the file keeps a hash of
+    each token (never the token), its user, client and when it was last used, and a client that
+    kept its token goes on after the restart without logging in again (17 Nov: stopping the
+    service to recover a blocked device logged everybody out).  Logout, the idle timeout and
+    disabling the account end a session as before; the user record is read again on restore."""
+
+    def __init__(self, idle_timeout_s: float = 12 * 3600, path: Path | None = None,
+                 get_user=None):
         self.idle_timeout_s = idle_timeout_s
         self._sessions: dict[str, Session] = {}
+        self._saved: dict[str, dict] = {}            # token hash -> user_id, client, created, last_seen
         self._lock = threading.Lock()
+        self._path = Path(path) if path else None
+        self._get_user = get_user
+        if self._path is not None:
+            self._load()
 
+    # -------------------------------------------------------------- file --
+    def _load(self) -> None:
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            saved = data.get("sessions", {}) if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            log.warning("sessions file %s not readable (%s); everybody logs in again", self._path, exc)
+            return
+        now = time.time()
+        self._saved = {h: v for h, v in saved.items()
+                       if isinstance(v, dict) and now - float(v.get("last_seen", 0)) <= self.idle_timeout_s}
+        if len(self._saved) != len(saved):
+            self._write()
+
+    def _write(self) -> None:
+        """Write the saved sessions (with the lock held, or before anybody can use them)."""
+        if self._path is None:
+            return
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps({"version": 1, "sessions": self._saved}), encoding="utf-8")
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            log.warning("sessions not saved to %s (%s): a service restart will need a new login",
+                        self._path, exc)
+
+    def _remember(self, s: Session) -> None:
+        if self._path is None:
+            return
+        h = _token_hash(s.token)
+        s.saved_seen = time.time()
+        created = self._saved.get(h, {}).get("created", s.saved_seen)
+        self._saved[h] = {"user_id": s.user_id, "client": s.client, "created": created,
+                          "last_seen": s.saved_seen}
+        self._write()
+
+    def _forget(self, tokens: list[str]) -> None:
+        if self._path is None:
+            return
+        changed = False
+        for t in tokens:
+            changed |= self._saved.pop(_token_hash(t), None) is not None
+        if changed:
+            self._write()
+
+    def _restore(self, token: str) -> Session | None:
+        """A session saved by an earlier run of the service (lock held)."""
+        saved = self._saved.get(_token_hash(token))
+        if saved is None or self._get_user is None:
+            return None
+        if time.time() - float(saved.get("last_seen", 0)) > self.idle_timeout_s:
+            self._forget([token])
+            return None
+        try:
+            user = self._get_user(int(saved["user_id"]))
+        except (ServiceError, KeyError, ValueError, TypeError):
+            user = None
+        if not user or user.get("disabled"):
+            self._forget([token])
+            return None
+        s = Session(token=token, user=user, client=str(saved.get("client", "client")))
+        self._sessions[token] = s
+        log.info("session of %s (%s) continues after a service restart", user["username"], s.client)
+        return s
+
+    # --------------------------------------------------------------- API --
     def create(self, user: dict, client: str) -> Session:
         token = secrets.token_urlsafe(32)
         s = Session(token=token, user=user, client=str(client or "client")[:40])
         with self._lock:
             self._sessions[token] = s
+            self._remember(s)
         return s
 
     def get(self, token: str | None) -> Session:
         if not token:
             raise ServiceError(ErrorCode.AUTH_REQUIRED, "log in first")
         with self._lock:
-            s = self._sessions.get(token)
+            s = self._sessions.get(token) or self._restore(token)
             if s is None:
                 raise ServiceError(ErrorCode.AUTH_REQUIRED, "session expired or unknown; log in again")
             now = time.monotonic()
             if now - s.last_seen > self.idle_timeout_s:
                 del self._sessions[token]
+                self._forget([token])
                 raise ServiceError(ErrorCode.AUTH_REQUIRED, "session timed out; log in again")
             s.last_seen = now
+            if time.time() - s.saved_seen > SAVE_LAST_SEEN_EVERY_S:
+                self._remember(s)
             return s
 
     def drop(self, token: str) -> None:
         with self._lock:
             self._sessions.pop(token, None)
+            self._forget([token])
 
     def drop_user(self, user_id: int) -> None:
         with self._lock:
-            for t in [t for t, s in self._sessions.items() if s.user_id == user_id]:
+            tokens = [t for t, s in self._sessions.items() if s.user_id == user_id]
+            for t in tokens:
                 del self._sessions[t]
+            self._forget(tokens)
+            stale = [h for h, v in self._saved.items() if v.get("user_id") == user_id]
+            for h in stale:
+                del self._saved[h]
+            if stale:
+                self._write()
 
     def update_user(self, user: dict) -> None:
         with self._lock:

@@ -238,14 +238,41 @@ Environment: conda `SambaMini`, Python 3.11.18, PyQt6 6.10.2, matplotlib
   Browser test checks that the map is still being measured when it opens it.
   Suite ≈270 s → ≈195 s.
 
+* 2026-11-17 — **Resume reconnects the instrument that failed** (branch
+  `feature/reconnect-on-resume`).  On the rig an XY map paused at point
+  1579/2501 because a DAQ task stopped finishing (NI -200560, "Wait Until
+  Done ... within the specified timeout"); Resume only retried the point on
+  the same stuck task, and nothing could reconnect the DAQ without ending the
+  run (Samba_controls refuses while the run holds it).  Now the device host
+  names the physical instrument in every error (a DAQ error inside
+  `moke.measure_point` is `daq`'s, no longer a fault of `moke`), and Resume
+  reconnects it before the retry (also Continue inside field sweeps and time
+  traces, which run on the service); a failed reconnect pauses again.  A
+  reconnect writes no outputs.  Raw driver errors inside a field sweep or time
+  trace now pause the run like other hardware errors instead of failing it.
+  With an older service the engine reconnects the DAQ for a `moke` error.
+  Closing Samba_mini afterwards left the setup blocked ("the previous
+  owner's work is still being stopped") because the stuck DAQ could not zero
+  the coil and only a forced release reconnected faulted devices: every
+  release now does, also for a device that faulted in the cleanup itself,
+  and then runs the cleanup again.  Stopping the service to recover a
+  device ended the scan and logged everybody out: logins now survive a
+  restart (`state\sessions.json`, token hashes), and a stop during an X, Y
+  or XY map pauses it (the service answers the point in flight with
+  "stopping", stops the stages, leaves coil and lock-in on); Resume after the
+  restart takes control again on the new service, reconnects instruments it
+  could not connect and continues from that point.  Control taken away on the
+  same service (forced release, expiry) still ends the scan.  Samba_controls
+  no longer logs out when its service exits.  Simulation only.
+
 ## Tests
 
-`scripts\run_tests.bat` → **157 passed** (≈195 s, 2026-11-17) on the
+`scripts\run_tests.bat` → **166 passed** (≈210 s, 2026-11-17) on the
 measurement PC, simulation and fake drivers only.  Per area: service 16,
-engine 14, drivers 17, core 16, recovery 4, process 2, GUI 17, review
+engine 14, drivers 17, core 17, recovery 10, process 2, GUI 17, review
 regressions 22, profiles/calibration backend 4, profiles/calibration GUI 16,
 device settings and lights 6, user folders 2, channels 6, coil/lock-in policy 4,
-settle/calibration box/units 7, stuck control 4.
+settle/calibration box/units 7, stuck control 6.
 See the README table for what each covers.
 
 Manual checks done: offscreen renders of both windows inspected (Trajectory,

@@ -196,6 +196,20 @@ Logs: `%LOCALAPPDATA%\SambaMini\logs\service.log` (rotating).
 * *Stop service* (or closing Samba_controls with *Yes*) asks the service to
   shut down: operations are aborted, cleanup runs, devices are disconnected
   (the 7270 socket is closed so its slot is freed), then the process exits.
+* During an X, Y or XY map, a stop does not end the scan: Samba_mini pauses
+  it, the stages stop, and the coil and the lock-in output stay as they are.
+  Start the service again (e.g. after recovering a blocked instrument), then
+  **Resume** in Samba_mini takes control again and continues the map from the
+  point where it stopped (`/metadata service_restarts` counts this).  Field
+  sweeps and time scans run inside the service and end with it.
+* Logins survive a service restart (token hashes in `state\sessions.json`):
+  neither window asks for the password again.  Logout, the idle timeout
+  (`session_idle_timeout_s`, 12 h) and disabling an account still end a
+  session; closing and reopening a window asks again.
+* After a hardware error, **Resume** first reconnects the instrument that
+  failed (a stuck NI-DAQ task, -200560, stays stuck otherwise); releasing
+  control reconnects a faulted instrument before the cleanup, so a stuck DAQ
+  no longer leaves the setup blocked until an administrator forces it.
 * If it does not exit, Samba_controls offers to terminate it; then no cleanup
   runs and outputs keep their last values — check the setup.
 * Closing Samba_mini during a run asks to abort it and waits for the cleanup.

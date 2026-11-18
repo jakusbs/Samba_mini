@@ -199,7 +199,9 @@ class ServiceClient:
         info = self.call("server.hello", {}, timeout_s)
         protocol.check_protocol(info.get("protocol"))
         if self.instance_id and info["instance_id"] != self.instance_id:
-            self._notify("restarted", info)
+            had = self.lease_holder
+            self.lease_holder = False             # control never survives a restart (the session does)
+            self._notify("restarted", dict(info, lease_lost=had))
         self.instance_id = info["instance_id"]
         self.features = set(info.get("features") or ())
         return info
@@ -258,14 +260,19 @@ class ServiceClient:
                     if exc.code == ErrorCode.AUTH_REQUIRED:
                         self.lease_holder = False
                     continue
-                if res.get("instance_id"):
-                    # The session answered, so it lives on this instance.  A service restart ends
-                    # the session (reported as session_lost); an id differing here only means the
-                    # recorded one was stale -- adopt it instead of reporting a restart every beat.
-                    self.instance_id = res["instance_id"]
+                iid = res.get("instance_id")
+                restarted = bool(iid and self.instance_id and iid != self.instance_id)
+                if iid:
+                    # The session answered, so it lives on this instance (sessions survive a
+                    # restart).  A differing id alone may only be a stale record: adopt it.
+                    self.instance_id = iid
                 had = self.lease_holder
                 self.lease_holder = bool(res.get("lease_holder"))
-                if had and not self.lease_holder:
+                if restarted and had:
+                    # Control did not survive the restart, but nobody took it away: not "lease
+                    # lost" (which stops a measurement); a map scan waits and takes it again.
+                    self._notify("restarted", {"instance_id": iid, "session_kept": True, "lease_lost": True})
+                elif had and not self.lease_holder:
                     self._notify("lease_lost", res.get("lease") or {})
         self._hb_thread = threading.Thread(target=loop, name="svc-heartbeat", daemon=True)
         self._hb_thread.start()

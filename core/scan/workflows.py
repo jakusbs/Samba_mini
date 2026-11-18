@@ -133,6 +133,11 @@ class Workflow:
         return req
 
 
+#: Measurements the engine drives point by point: they can wait out a stop of the device service
+#: and continue afterwards (field sweeps and time traces run inside the service and end with it).
+#: The service keeps the coil and the lock-in output on when it stops during one of these.
+RESUMABLE_AFTER_SERVICE_STOP = ("x_sweep", "y_sweep", "xy_sweep")
+
 COIL = dict(unit="V", min=-6.0, max=6.0, decimals=4)
 
 WORKFLOWS: dict[str, Workflow] = {}

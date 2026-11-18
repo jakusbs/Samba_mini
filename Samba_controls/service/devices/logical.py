@@ -250,18 +250,47 @@ class MokeSequencer(Device):
         return out
 
     # ------------------------------------------------------------- operations
+    def _failed_instrument(self, exc: ServiceError) -> str | None:
+        """The physical instrument an error came from (the host names it), or None."""
+        name = exc.details.get("device")
+        try:
+            return name if name and self.host.device(name).PHYSICAL else None
+        except ServiceError:
+            return None
+
     def _gated_point(self, op, fn, label: str, auto_pause: bool):
         """Pause gate + MiniMoke-style auto-pause on hardware error (retry the
-        same point after Continue).  Returns (held_seconds, record)."""
+        same point after Continue).  Continue first reconnects the instrument the error came
+        from: a stuck DAQ task stays stuck otherwise, and a reconnect writes no outputs (coil,
+        lock-in settings and stage stay as they are).  Returns (held_seconds, record)."""
         held = 0.0
+        reconnect = None
         while True:
             held += op.checkpoint()
+            if reconnect is not None:
+                log.warning("%s: reconnecting %s before the retry", label, reconnect)
+                try:
+                    self.host.reconnect(reconnect, 60.0, op.cancel)
+                except ServiceError as exc:
+                    if exc.code == ErrorCode.CANCELLED or op.cancel.cancelled:
+                        raise
+                    msg = (f"Reconnecting {reconnect} failed: {exc.message} - PAUSED; fix the cause, "
+                           "then Continue to try again")
+                    log.error(msg)
+                    op.emit({"kind": "error", "label": f"reconnect {reconnect}", "error": exc.to_dict()})
+                    op.auto_pause(msg)
+                    continue
+                log.info("%s: %s reconnected", label, reconnect)
+                reconnect = None
             try:
                 return held, fn()
             except ServiceError as exc:
                 if exc.code == ErrorCode.CANCELLED or op.cancel.cancelled or not auto_pause:
                     raise
-                msg = f"Hardware error at {label}: {exc.message} - PAUSED; fix the cause, then Continue"
+                reconnect = self._failed_instrument(exc)
+                then = (f"then Continue to reconnect {reconnect} and retry this point" if reconnect
+                        else "then Continue")
+                msg = f"Hardware error at {label}: {exc.message} - PAUSED; fix the cause, {then}"
                 log.error(msg)
                 op.emit({"kind": "error", "label": label, "error": exc.to_dict()})
                 op.auto_pause(msg)

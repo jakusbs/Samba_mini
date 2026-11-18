@@ -29,6 +29,19 @@ from Samba_controls.service.worker import CancelToken, DeviceWorker, NEVER_CANCE
 log = logging.getLogger(__name__)
 
 
+def _attributed(name: str, fn: Callable[[], Any]) -> Any:
+    """Run a call of physical device *name*; an error from it names that device
+    (``details["device"]``).  A DAQ error inside the logical ``moke`` sequencer is then the
+    DAQ's, not ``moke``'s, and a run paused on it knows which instrument to reconnect."""
+    try:
+        return fn()
+    except ServiceError as exc:
+        exc.details.setdefault("device", name)
+        raise
+    except Exception as exc:  # noqa: BLE001 - any driver error
+        raise ServiceError(ErrorCode.DEVICE_FAULT, f"{name}: {exc}", {"device": name}) from exc
+
+
 def build_devices(cfg: MachineConfig, state_dir) -> tuple[list[Device], dict]:
     """Instantiate devices for the configured mode.  Returns (devices, notes)."""
     from Samba_controls.service.devices.logical import Magnet, MokeSequencer
@@ -121,7 +134,7 @@ class DeviceHost:
         d = self.device(name)
         if not d.PHYSICAL:
             raise ServiceError(ErrorCode.INTERNAL, f"{name} is logical")
-        return self._workers[name].submit(lambda: fn(d), timeout_s, cancel, label)
+        return self._workers[name].submit(lambda: _attributed(name, lambda: fn(d)), timeout_s, cancel, label)
 
     def wait(self, name: str, job, timeout_s: float):
         return self._workers[name].wait(job, timeout_s)
@@ -143,7 +156,7 @@ class DeviceHost:
 
         if not d.PHYSICAL:
             return invoke()
-        return self._workers[name].call(invoke, timeout_s, cancel, label)
+        return self._workers[name].call(lambda: _attributed(name, invoke), timeout_s, cancel, label)
 
     # ------------------------------------------------------------ lifecycle
     def connect(self, name: str, timeout_s: float = 60.0, cancel: CancelToken | None = None) -> dict:

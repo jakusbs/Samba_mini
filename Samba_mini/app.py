@@ -751,7 +751,12 @@ class MainWindow(QMainWindow):
             self._set_mode_badge(None)
             self._log("warning", f"Device service not reachable ({info.get('reason', '')})")
         elif what == "restarted":
-            self._log("warning", "The device service restarted; log in again.")
+            # Sessions survive a service restart; if this one did not, "session_lost" follows.
+            if self.running:
+                self._log("warning", "The device service restarted. A map scan waits for it and continues "
+                                     "on Resume; other measurements end.")
+            else:
+                self._log("warning", "The device service restarted.")
         elif what == "session_lost":
             if self._session_user is not None:
                 if self.running:
