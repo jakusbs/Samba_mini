@@ -106,6 +106,37 @@ def _controls_without_service(monkeypatch):
     return w, started
 
 
+def test_controls_stays_responsive_after_its_service_stopped(qapp, samba_home):
+    """On the rig (18 Nov) Samba_controls lagged after its service was stopped: the login is kept
+    now (it survives a restart), so every tab change asked the stopped service (10 s timeout) and
+    closing the window waited 30 s for the logout.  Nothing is asked while the service is down."""
+    from core.gui.bridge import ServiceBridge
+    from Samba_controls.app import ControlsWindow
+    from tests.conftest import start_service
+    rs = start_service(samba_home)
+    w = ControlsWindow(ServiceBridge("Samba_controls", rs.rpc_port, rs.event_port), start_service=False)
+    _KEEP.append(w)
+    w.panel._timer.stop()
+    c = w.bridge.client
+    try:
+        assert w.bridge.probe() is not None
+        c.bootstrap(*ADMIN)
+        c.login(*ADMIN)
+    finally:
+        rs.stop()
+    assert w.bridge.probe(0.5) is None and not c.connected            # the device lights notice this too
+    for i in range(w.bottom.count()):
+        t0 = time.monotonic()
+        w.bottom.setCurrentIndex(i)
+        qapp.processEvents()
+        assert time.monotonic() - t0 < 1.0, w.bottom.tabText(i)
+    t0 = time.monotonic()
+    w._poll()
+    w.close()
+    assert time.monotonic() - t0 < 3.0
+    assert c.session is not None                    # kept for the restart, not logged out into the void
+
+
 def test_controls_starts_only_real_and_offers_import_without_config(qapp, samba_home, tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 

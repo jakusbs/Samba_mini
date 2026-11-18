@@ -59,6 +59,7 @@ class ControlsWindow(QMainWindow):
             self.restoreGeometry(g)
         else:
             self.resize(1280, 820)
+        self._poll_busy = False
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._poll)
@@ -390,11 +391,28 @@ class ControlsWindow(QMainWindow):
                    lambda e: self._msg("error", error_text(e)))
 
     # ------------------------------------------------------------------ polling / events
+    def _service_up(self) -> bool:
+        """Whether the service answers, without asking it: the last request got a reply (the
+        device lights ask every second) and a service this window started is still running.
+        The login is kept while the service is stopped (it survives a restart), so a check of the
+        session alone let tab changes and closing the window wait for timeouts (10-30 s each)."""
+        if self._we_started and not self.proc.running:
+            return False
+        return bool(self.bridge.client.connected)
+
     def _poll(self) -> None:
         c = self.bridge.client
-        if not c.session:
+        if not c.session or self._poll_busy or not self._service_up():
             return
-        call_async(lambda: c.call("server.status", {}, 5.0), self._show_status, lambda e: None)
+        self._poll_busy = True
+
+        def done(st):
+            self._poll_busy = False
+            self._show_status(st)
+
+        def failed(exc):
+            self._poll_busy = False
+        call_async(lambda: c.call("server.status", {}, 5.0), done, failed)
 
     def _show_status(self, st: dict) -> None:
         self.table.update_devices(st["devices"])
@@ -485,6 +503,8 @@ class ControlsWindow(QMainWindow):
             self.panel.reset("Service restarted")       # the session goes on (sessions survive restarts)
 
     def _tab_changed(self, idx: int) -> None:
+        if not self._service_up():
+            return                  # the tabs keep what they showed; refreshed when the service answers
         w = self.bottom.widget(idx)
         if w is self.users:
             self.users.refresh()
@@ -511,13 +531,15 @@ class ControlsWindow(QMainWindow):
                 ev.ignore()
                 return
         c = self.bridge.client
-        keep = (ask_keep_outputs(self, c) if c.session and c.lease_holder and self.bridge.probe(0.5) is not None
-                else [])
+        # Release and log out only on a service that answers: on a stopped one the logout waited
+        # 30 s.  The session then ends by its idle timeout (nobody else has its token).
+        up = bool(c.session) and self._service_up() and self.bridge.probe(0.5) is not None
+        keep = ask_keep_outputs(self, c) if up and c.lease_holder else []
         if keep is None:
             ev.ignore()
             return
         try:
-            if c.session:
+            if up:
                 if c.lease_holder:
                     c.release_lease(keep_outputs=keep)
                 c.logout()
