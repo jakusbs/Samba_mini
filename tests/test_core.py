@@ -345,3 +345,35 @@ def test_bd_fit_reads_samba_mini_time_scans(tmp_path):
     res = bd_fit.fit_file(str(path))
     assert res.ok, res.reason
     assert np.allclose(res.levels_mV, levels * 1e3, atol=0.05)
+
+
+def test_sessions_file_keeps_logins_across_restarts_but_not_disabled_or_idle_ones(tmp_path):
+    """Sessions survive a service restart through ``sessions.json`` (token hashes only); a
+    disabled account, an idle session or an unreadable file means a new login."""
+    from Samba_controls.service.auth import SessionManager
+    users = {1: {"id": 1, "username": "anna", "role": "operator", "disabled": False},
+             2: {"id": 2, "username": "ben", "role": "operator", "disabled": False}}
+    path = tmp_path / "state" / "sessions.json"
+    m = SessionManager(3600, path, users.__getitem__)
+    a, b = m.create(users[1], "Samba_mini"), m.create(users[2], "Samba_controls")
+    text = path.read_text(encoding="utf-8")
+    assert a.token not in text and b.token not in text
+    users[2] = dict(users[2], disabled=True)                    # disabled while the service was down
+    m2 = SessionManager(3600, path, users.__getitem__)          # the restarted service
+    assert m2.get(a.token).user["username"] == "anna" and m2.get(a.token).client == "Samba_mini"
+    with pytest.raises(ServiceError) as e:
+        m2.get(b.token)
+    assert e.value.code == ErrorCode.AUTH_REQUIRED
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for v in data["sessions"].values():
+        v["last_seen"] -= 7200                                   # idle for 2 h > 1 h timeout
+    path.write_text(json.dumps(data), encoding="utf-8")
+    m3 = SessionManager(3600, path, users.__getitem__)
+    with pytest.raises(ServiceError):
+        m3.get(a.token)
+    path.write_text("{not json", encoding="utf-8")
+    m4 = SessionManager(3600, path, users.__getitem__)          # unreadable: log in again, no crash
+    with pytest.raises(ServiceError):
+        m4.get(a.token)
+    c = m4.create(users[1], "Samba_mini")
+    assert SessionManager(3600, path, users.__getitem__).get(c.token).user["username"] == "anna"

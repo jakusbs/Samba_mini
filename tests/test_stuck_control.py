@@ -5,6 +5,9 @@ oscillator was off, so the lease stayed RECONCILING -- and a faulted device can 
 reconnected by the lease holder, so "Force release..." could not help either: only a service
 restart did.  Now an administrator's forced release reconnects faulted devices first and, once
 every operation has stopped, frees the setup even if a device's cleanup cannot be confirmed.
+Later the same day a DAQ task stuck at -200560 could not zero the coil when Samba_mini closed,
+and the setup stayed blocked until an administrator forced it: every release now reconnects
+faulted devices (also one that faulted in the cleanup itself) and runs the cleanup again.
 
 Separately, Samba_mini warned "The device service restarted" every 2 s after logging in to a
 service that had restarted since its first hello: the client records the instance at login.
@@ -34,11 +37,58 @@ def _wait(cond, timeout=20.0):
     return cond()
 
 
-def test_forced_release_reconnects_a_faulted_lockin_and_frees_the_setup(samba_home):
+def test_a_release_reconnects_a_faulted_lockin_and_frees_the_setup(samba_home):
     svc = start_service(samba_home)
     try:
         holder, admin = _admin(svc, "holder"), _admin(svc, "admin")
         lockin = svc.server.host.device("lockin")
+        holder.acquire_lease()
+        lockin.set_fault("could not convert string to float: '9\\x03-9.734E-04,-1.5E-03'", "read oscillator_V")
+        holder.release_lease()
+        st = admin.call("lease.status")
+        assert st["state"] == "FREE", st
+        rep = st["last_reconcile"]
+        assert rep["reconnected"] == ["lockin"] and rep["problems"] == [] and "unconfirmed" not in rep
+        assert lockin.state == DevState.ON
+        assert lockin.read_attribute("oscillator_V").value == 0.0           # the cleanup ran
+        admin.acquire_lease()                                                 # control can be taken
+    finally:
+        svc.stop()
+
+
+def test_a_release_reconnects_a_daq_that_got_stuck_in_its_cleanup(samba_home):
+    """The rig, 17 Nov: the DAQ was not faulted yet, its stuck task failed only when the release
+    tried to zero the coil.  The release reconnects it then and zeroes the coil."""
+    svc = start_service(samba_home)
+    try:
+        holder, admin = _admin(svc, "holder"), _admin(svc, "admin")
+        daq = svc.server.host.device("daq")
+        holder.acquire_lease()
+        holder.device("magnet").command("set_coil", coil_V=0.5)
+        daq._stuck = True                                       # its tasks stop finishing
+        holder.release_lease()
+        st = admin.call("lease.status")
+        assert st["state"] == "FREE", st
+        assert st["last_reconcile"]["reconnected"] == ["daq"] and st["last_reconcile"]["problems"] == []
+        assert daq.state == DevState.ON and daq.coil_V == 0.0
+        admin.acquire_lease()
+    finally:
+        svc.stop()
+
+
+def test_forced_release_reconnects_a_faulted_lockin_a_release_could_not(samba_home, monkeypatch):
+    svc = start_service(samba_home)
+    try:
+        holder, admin = _admin(svc, "holder"), _admin(svc, "admin")
+        lockin = svc.server.host.device("lockin")
+        real, tries = lockin._connect, []
+
+        def busy_at_first():                     # the release tries twice: before and after its cleanup
+            tries.append(1)
+            if len(tries) <= 2:
+                raise ServiceError(ErrorCode.DEVICE_UNAVAILABLE, "7270 not answering yet")
+            real()
+        monkeypatch.setattr(lockin, "_connect", busy_at_first)
         holder.acquire_lease()
         lockin.set_fault("could not convert string to float: '9\\x03-9.734E-04,-1.5E-03'", "read oscillator_V")
         holder.release_lease()                                   # cleanup cannot reach the lock-in

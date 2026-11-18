@@ -73,7 +73,7 @@ survives because a key is missing.  It only fills widgets: stage positions are
 
 * **Logout** saves pending changes first (asks if that fails), releases
   control and logs out; the window returns to the logged-out defaults.
-* **Session expiry** (service restart, idle timeout): the window returns to the
+* **Session expiry** (idle timeout; a service restart keeps the session): the window returns to the
   logged-out defaults at once (after the running measurement, if one is
   running).  Unsaved changes are kept in memory and given back only if the
   *same* account logs in again; another account starts from its own state.

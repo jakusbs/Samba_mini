@@ -58,7 +58,8 @@ class RunningService:
 
 
 def start_service(home: Path, overrides: dict | None = None, connect: bool = True,
-                  lease_ttl_s: float = 15.0) -> RunningService:
+                  lease_ttl_s: float = 15.0, rpc_port: int | None = None,
+                  event_port: int | None = None) -> RunningService:
     from core import paths
     from core.config import machine
     from Samba_controls.service.server import ServiceServer
@@ -68,7 +69,8 @@ def start_service(home: Path, overrides: dict | None = None, connect: bool = Tru
     data["backend"]["reconcile_wait_s"] = 10.0
     cfg = machine.MachineConfig(data, None, "loaded", [])
     server = ServiceServer(cfg, paths.accounts_db_path(), paths.state_dir(), control_token="ctl-token",
-                           connect=False, rpc_port=free_port(), event_port=free_port())
+                           connect=False, rpc_port=rpc_port or free_port(),
+                           event_port=event_port or free_port())
     server.bind()
     server.start_background()
     if connect:

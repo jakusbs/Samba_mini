@@ -235,9 +235,11 @@ the owners' workers).  Logical devices never open hardware themselves.
   Samba_controls).  It is held by one session, renewed by heartbeats, expires
   after `lease_ttl_s` (default 15 s).  On expiry or release with work
   outstanding the backend cancels operations, runs the configured cleanup and
-  only then frees the lease (`LEASE_RECONCILING` until done).  An
-  administrator's forced release reconnects faulted devices first and, once
-  every operation has stopped, frees the setup even if the cleanup of an
+  only then frees the lease (`LEASE_RECONCILING` until done).  Every
+  release, expiry or forced release reconnects the faulted devices the
+  cleanup needs first, and once more any device that faulted in the cleanup
+  itself (then the cleanup runs again).  An administrator's forced release,
+  once every operation has stopped, frees the setup even if the cleanup of an
   unreachable device cannot be confirmed (reported as `unconfirmed`).  Reads and cached
   monitoring do not need the lease; monitoring never polls an instrument that
   an operation is using — it serves the operation's latest values instead.
@@ -266,6 +268,12 @@ the owners' workers).  Logical devices never open hardware themselves.
 * **Retries:** a timed-out move is never repeated blindly.  The backend reads
   the position back, reports `TIMEOUT` with the readback, and the engine pauses
   the run (MiniMoke's auto-pause behaviour) for the operator to decide.
+  The error names the physical instrument it came from (`details.device`, set
+  by the device host: a DAQ error inside `moke.measure_point` is `daq`'s), and
+  Resume (Continue inside a field sweep or time trace) reconnects that
+  instrument before the point is retried: a stuck DAQ task (NI -200560) stays
+  stuck on the same connection.  A reconnect writes no outputs, so coil,
+  lock-in settings and stage stay as they are; a failed reconnect pauses again.
   Relative moves are only offered as manual jogs, never inside scans.
 * **Pause** holds after the current point with field, outputs and position
   unchanged (MiniMoke behaviour); pacing resumes from the pause.

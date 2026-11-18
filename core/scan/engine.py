@@ -41,7 +41,7 @@ from core.protocol import ErrorCode, ServiceError, new_id
 from core.scan import plans
 from core.scan.channels import (AVERAGED, BOOKKEEPING, RESERVED, RESERVED_PREFIXES, Channel, dataset_key,
                                 sensors_for)
-from core.scan.workflows import WORKFLOWS, Workflow
+from core.scan.workflows import RESUMABLE_AFTER_SERVICE_STOP, WORKFLOWS, Workflow
 from core.storage.hdf5_writer import DatasetSpec, ScanWriter, StorageError, make_filename
 from core.version import describe, software_revision
 
@@ -54,6 +54,14 @@ UM_PER_MM = 1000.0
 INITIAL_FIELD_WAIT_S = 1.0          # MiniMoke: "Setting magnetic field ..., waiting 1 s"
 BACKEND_LOST_AFTER = 3              # consecutive RPC timeouts
 BEGIN_WAIT_S = 30.0                 # wait this long for a manual command (e.g. a jog) to finish before starting
+#: Logical endpoints and the instrument behind their failures when an older service does not
+#: name the physical device: the acquisition (and the coil) is the DAQ.
+_INSTRUMENT_OF = {"moke": "daq", "magnet": "daq"}
+
+
+def _service_silent(exc: ServiceError) -> bool:
+    """The service itself did not answer (the client's timeout), as opposed to an instrument."""
+    return exc.code == ErrorCode.TIMEOUT and "did not answer" in exc.message
 
 
 class Abort(Exception):
@@ -121,6 +129,11 @@ class ScanEngine:
         self._writer: ScanWriter | None = None
         self._pending_writes: list[tuple] = []
         self._rpc_failures = 0
+        self._reconnect: str | None = None      # instrument to reconnect when the run resumes
+        self._service_lost = False              # paused because the device service went away
+        self._instance: str | None = None       # the service instance the run began on
+        self._required: list[str] = []          # devices declared at run.begin
+        self.service_restarts = 0
         self.result: dict | None = None
         self.path: Path | None = None
         self.points_done = 0
@@ -269,15 +282,21 @@ class ScanEngine:
             self._abort.wait(min(left, 0.1))
 
     def _gate(self) -> None:
-        """Between points: hold while paused; raise on abort."""
+        """Between points: hold while paused; raise on abort.  After a hardware error, Resume
+        first reconnects the instrument that failed (see ``_hardware_pause``)."""
         self._check()
         if not self._pause.is_set():
             return
-        self._set_state(PAUSED, self.message or "Paused")
-        while self._pause.is_set():
+        while True:
+            self._set_state(PAUSED, self.message or "Paused")
+            while self._pause.is_set():
+                self._check()
+                self._abort.wait(0.1)
             self._check()
-            self._abort.wait(0.1)
-        self._check()
+            if self._service_lost and not self._reattach():
+                continue
+            if self._reconnect is None or self._reconnect_now():
+                break
         self._set_state(RUNNING, "")
 
     def _auto_pause(self, msg: str) -> None:
@@ -285,11 +304,129 @@ class ScanEngine:
         self._pause.set()
         self._set_state(PAUSED, msg)
 
+    def _hardware_pause(self, where: str, exc: ServiceError, called: str) -> None:
+        """Pause on a hardware error and remember the instrument to reconnect on Resume: the one
+        the service names (``details["device"]``), else the device that was called.  Retrying
+        on the same connection does not help a stuck instrument (e.g. a DAQ task that never
+        finishes, -200560), and a reconnect writes no outputs: coil, lock-in settings and stage
+        stay as they are."""
+        name = exc.details.get("device") or called
+        name = _INSTRUMENT_OF.get(name, name)
+        self._reconnect = name if exc.code != ErrorCode.BUSY else None
+        then = (f"Resume to reconnect {name} and retry this point" if self._reconnect
+                else "Resume to retry this point")
+        self._auto_pause(f"Hardware error at {where}: {exc.message} - PAUSED. Fix the cause, then {then}, or Abort.")
+
+    def _service_gone_or_restarted(self) -> bool:
+        """After losing the service, the session or control: True if the service is gone or is a
+        new instance (stopped and started again).  Then the scan can wait and go on: a service
+        that stops during a map scan leaves coil and lock-in output on.  False if the same
+        service took control away (lease expired, forced release): its cleanup switched the
+        outputs off, so the scan must not simply go on."""
+        base = getattr(self.client, "_client", self.client)
+        try:
+            info = base.hello(2.0)
+        except ServiceError:
+            return True
+        return bool(self._instance) and info.get("instance_id") != self._instance
+
+    def _may_wait_for_service(self) -> bool:
+        """A lost service may be waited for: a map scan, not stopped by the operator or a forced
+        release, and the service is gone or was restarted (see ``_service_gone_or_restarted``)."""
+        return (not self._abort.is_set() and not self._lease_lost.is_set()
+                and self.wf.key in RESUMABLE_AFTER_SERVICE_STOP and self._service_gone_or_restarted())
+
+    def _service_pause(self, where: str, reason: str) -> None:
+        self._service_lost = True
+        self._reconnect = None              # a restarted service connects every instrument anew
+        self._auto_pause(f"Lost the device service at {where} ({reason}) - PAUSED. Coil and lock-in output "
+                         "stay as they are. Start the service again, then Resume to continue the scan "
+                         "from this point, or Abort.")
+
+    def _reattach(self) -> bool:
+        """Resume after losing the service: on the same service (it was only slow) go on; on a
+        restarted one take control again, begin a new run with the same devices (reconnecting
+        any the service could not connect at its start) and go on.  False (and paused again) if
+        that is not possible yet."""
+        base = getattr(self.client, "_client", self.client)
+        self._set_state(RUNNING, "Connecting to the device service")
+        try:
+            info = base.hello(3.0)
+            if info.get("instance_id") == self._instance:
+                self._service_lost = False
+                self._rpc_failures = 0
+                self._log("info", "The device service answers again; the scan continues.")
+                return True
+            if not base.session:
+                raise ServiceError(ErrorCode.AUTH_REQUIRED, "not logged in any more: Abort, log in and "
+                                   "measure the rest")
+            base.acquire_lease()
+            self.client = base
+            try:
+                run = self._begin_run(self._required)
+            except ServiceError as exc:
+                missing = [str(m).split(":")[0] for m in exc.details.get("missing", [])]
+                if exc.code != ErrorCode.DEVICE_UNAVAILABLE or not missing:
+                    raise
+                for name in missing:
+                    self._log("info", f"Reconnecting {name} (not available on the restarted service).")
+                    self._rpc(lambda n=name: base.device(n).reconnect(), f"reconnect {name}")
+                run = self._begin_run(self._required)
+            self.client = base.for_run(run["run_id"])
+        except (ServiceError, Interrupted) as exc:
+            msg = exc.message if isinstance(exc, ServiceError) else str(exc)
+            self._auto_pause(f"Device service not ready ({msg}) - PAUSED. Start it, then Resume, or Abort.")
+            return False
+        self._instance = info.get("instance_id")
+        self._service_lost = False
+        self._rpc_failures = 0
+        self.service_restarts += 1
+        if self._writer:
+            self._writer.set_metadata(service_restarts=self.service_restarts)
+        if self.read_hall:
+            try:
+                self._prepare_hall(plans.hall_integration_for(self.params["acq_time"]))
+            except (ServiceError, Interrupted) as exc:
+                self._log("warning", f"Hall integration not set again after the restart ({exc}); the Hall "
+                                     "probe averages with its default from now on.")
+        self._log("info", "Back on the restarted device service with control of the setup; the scan "
+                          "continues.")
+        return True
+
+    def _reconnect_now(self) -> bool:
+        """Reconnect the instrument a hardware error came from; False (and paused again) if
+        that failed."""
+        name = self._reconnect
+        self._set_state(RUNNING, f"Reconnecting {name}")
+        self._log("info", f"Reconnecting {name} before retrying the point.")
+        try:
+            self._rpc(lambda: self._dev(name).reconnect(), f"reconnect {name}")
+        except Interrupted as exc:
+            if not self._may_wait_for_service():
+                raise
+            self._service_pause(f"reconnecting {name}", str(exc))
+            return False
+        except ServiceError as exc:
+            if exc.code == ErrorCode.CANCELLED or self._abort.is_set():
+                self._check()
+                raise
+            if _service_silent(exc) and self._may_wait_for_service():
+                self._service_pause(f"reconnecting {name}", exc.message)
+                return False
+            self._auto_pause(f"Reconnecting {name} failed: {exc.message} - PAUSED. Fix the cause, then "
+                             "Resume to try again, or Abort.")
+            return False
+        self._reconnect = None
+        self._log("info", f"{name} reconnected.")
+        return True
+
     def _rpc(self, fn: Callable[[], Any], what: str) -> Any:
         """Run a service call; consecutive timeouts mean the service is gone."""
         try:
             result = fn()
         except ServiceError as exc:
+            if exc.details.get("service_stopping"):
+                raise Interrupted("the device service stopped") from exc
             if exc.code == ErrorCode.TIMEOUT and "did not answer" in exc.message:
                 self._rpc_failures += 1
                 if self._rpc_failures >= BACKEND_LOST_AFTER:
@@ -334,6 +471,7 @@ class ScanEngine:
         try:
             hello = self.client.hello()
             self.mode = hello["mode"]
+            self._instance = hello.get("instance_id")
             self._validate()
             if not self.client.lease_holder:
                 self.client.acquire_lease()
@@ -347,6 +485,7 @@ class ScanEngine:
             if not self.read_lockin and "lockin" in required:
                 required.remove("lockin")              # no lock-in channel ticked: the lock-in is not used
             self._read_before_run()
+            self._required = list(required)
             run = self._begin_run(required)
             self.client = self.client.for_run(run["run_id"])
             began = True
@@ -957,6 +1096,9 @@ class ScanEngine:
         while k < len(pts):
             pt = pts[k]
             self._gate()
+            if stage.client is not self.client:      # a new run after a service restart
+                stage = self._dev(f"stage_{self.req.setup}")
+            called = stage.name
             try:
                 moved = False
                 if pt.x_um != last_x:
@@ -972,6 +1114,7 @@ class ScanEngine:
                 changed = pending_settle or moved or pt.coil_V != last_coil
                 settle = p["settle_time"] if changed else 0.0
                 token = f"{k}"
+                called = "moke"
                 rec = self._rpc(lambda: self._dev("moke").command(
                     "measure_point", coil_V=pt.coil_V, acq_time_s=p["acq_time"], settle_s=settle,
                     hall=record_hall, lockin=self.read_lockin, lockin_after="acquisition", token=token),
@@ -980,6 +1123,13 @@ class ScanEngine:
                     raise ServiceError(ErrorCode.INTERNAL, "stale point rejected (token mismatch)")
                 last_coil = pt.coil_V
                 pending_settle = False
+            except Interrupted as exc:
+                if not self._may_wait_for_service():
+                    raise
+                last_x = last_y = math.nan          # re-command absolute targets after the restart
+                pending_settle = True
+                self._service_pause(f"point {k + 1}/{len(pts)}", str(exc))
+                continue
             except ServiceError as exc:
                 if exc.code == ErrorCode.CANCELLED or self._abort.is_set():
                     self._check()
@@ -989,8 +1139,10 @@ class ScanEngine:
                 # Positions after a failed move are unknown: re-command absolute targets.
                 last_x = last_y = math.nan
                 pending_settle = True
-                self._auto_pause(f"Hardware error at point {k + 1}/{len(pts)}: {exc.message} - PAUSED. "
-                                 "Fix the cause, then Resume to retry this point, or Abort.")
+                if _service_silent(exc) and self._may_wait_for_service():
+                    self._service_pause(f"point {k + 1}/{len(pts)}", exc.message)
+                else:
+                    self._hardware_pause(f"point {k + 1}/{len(pts)}", exc, called)
                 continue
             vals, by_id = self._sensor_values(rec)
             vals["coil_setpoint"] = pt.coil_V

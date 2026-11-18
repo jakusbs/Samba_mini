@@ -25,6 +25,7 @@ from core.gui.bridge import ServiceBridge, call_async, error_text
 from core.gui.login import LoginDialog
 from core.gui.outputs import ask_keep_outputs
 from core.protocol import ServiceError
+from core.scan.workflows import RESUMABLE_AFTER_SERVICE_STOP
 from core.theme import app_style
 from core.version import __version__
 from Samba_controls.panels import admin as admin_panel
@@ -250,8 +251,19 @@ class ControlsWindow(QMainWindow):
         mode = info["mode"]
         self._set_badge("SERVICE: SIMULATION" if mode == "simulation" else "SERVICE: REAL HARDWARE",
                         "sim_badge" if mode == "simulation" else "real_badge")
-        if not self.bridge.client.session:
+        c = self.bridge.client
+        if c.session:
+            try:
+                c.call("auth.whoami", {}, 5.0)    # still valid after a restart? (else: session_lost)
+            except ServiceError:
+                pass
+        if not c.session:
             self._login()
+        else:
+            u = c.user or {}
+            self.user_lbl.setText(f"{u.get('username', '?')} ({u.get('role', '?')})")
+            self.login_btn.setText("Log out")
+            self.panel.reset()
         self._poll()
         self.cfg.refresh()
 
@@ -265,9 +277,15 @@ class ControlsWindow(QMainWindow):
             st = {}
         force = False
         if st.get("run_active") or st.get("active_operation"):
-            ans = QMessageBox.question(self, "Measurement running",
-                                       "A measurement is running. Stopping the service aborts it and runs the "
-                                       "cleanup (coil 0 V, lock-in output 0 V, stages stopped). Continue?")
+            run = st.get("run_info") or {}
+            if run.get("workflow") in RESUMABLE_AFTER_SERVICE_STOP and not st.get("active_operation"):
+                text = ("A map scan is running. Stopping the service pauses it: the stages stop, the coil "
+                        "and the lock-in output stay as they are. Start the service again, then Resume in "
+                        "Samba_mini continues the scan where it stopped. Continue?")
+            else:
+                text = ("A measurement is running. Stopping the service aborts it and runs the cleanup "
+                        "(coil 0 V, lock-in output 0 V, stages stopped). Continue?")
+            ans = QMessageBox.question(self, "Measurement running", text)
             if ans != QMessageBox.StandardButton.Yes:
                 return False
             force = True
@@ -292,10 +310,9 @@ class ControlsWindow(QMainWindow):
     def _svc_exited(self, code: int) -> None:
         self._set_badge(f"SERVICE STOPPED (exit {code})", "offline_badge")
         self.lights.set_service_stopped(f"service stopped (exit {code})")
-        self.bridge.client.session = None
+        # The session is kept: the service keeps sessions across a restart, so starting it again
+        # needs no new login (it asks only if the session did not survive).
         self.bridge.client.lease_holder = False
-        self.user_lbl.setText("not logged in")
-        self.login_btn.setText("Log in")
         self.panel.reset("Service stopped")
         meaning = {0: "", 3: " — another service instance is already running", 4: " — port in use"}.get(code, "")
         self._msg("warning" if code else "info", f"Service exited with code {code}{meaning}")
@@ -460,11 +477,12 @@ class ControlsWindow(QMainWindow):
             self._set_badge("SERVICE STOPPED", "offline_badge")
         elif what == "lease_lost":
             self._msg("warning", "You lost control of the setup.")
-        elif what in ("session_lost", "restarted"):
+        elif what == "session_lost":
             self.panel.reset("Log in again to see the devices")
-            if what == "session_lost":
-                self.user_lbl.setText("session expired")
-                self.login_btn.setText("Log in")
+            self.user_lbl.setText("session expired")
+            self.login_btn.setText("Log in")
+        elif what == "restarted":
+            self.panel.reset("Service restarted")       # the session goes on (sessions survive restarts)
 
     def _tab_changed(self, idx: int) -> None:
         w = self.bottom.widget(idx)
